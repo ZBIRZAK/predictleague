@@ -1,0 +1,47 @@
+{
+  "name": "predictleague",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "dev": "node node_modules/npm-run-all/bin/npm-run-all/index.js --parallel dev:api dev:web",
+    "dev:api": "node --env-file=.env node_modules/tsx/dist/cli.mjs watch server/index.ts",
+    "dev:web": "node node_modules/vite/bin/vite.js",
+    "typecheck": "node node_modules/typescript/bin/tsc --noEmit && node node_modules/typescript/bin/tsc --noEmit -p tsconfig.server.json",
+    "build": "npm run typecheck && node node_modules/vite/bin/vite.js build && node node_modules/typescript/bin/tsc -p tsconfig.server.json",
+    "preview": "node node_modules/vite/bin/vite.js preview",
+    "start": "node --env-file=.env dist-server/index.js",
+    "lint": "node node_modules/eslint/bin/eslint.js .",
+    "test": "node node_modules/vitest/vitest.mjs run"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/express": "^5.0.5",
+    "@types/node": "^25.3.5",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
+    "eslint": "^9.39.1",
+    "eslint-plugin-react-hooks": "^7.0.0",
+    "eslint-plugin-react-refresh": "^0.4.24",
+    "globals": "^16.4.0",
+    "npm-run-all": "^4.1.5",
+    "tsx": "^4.20.6",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.46.4",
+    "vite": "^7.3.1",
+    "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.98.0",
+    "@types/nodemailer": "^7.0.11",
+    "express": "^5.1.0",
+    "firebase": "^12.10.0",
+    "nodemailer": "^8.0.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  }
+}
