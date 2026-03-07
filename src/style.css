@@ -153,6 +153,36 @@ body {
   text-align: center;
 }
 
+.api-usage-badge {
+  position: fixed;
+  right: 14px;
+  bottom: 14px;
+  z-index: 60;
+  display: grid;
+  gap: 0.1rem;
+  padding: 0.42rem 0.55rem;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 10px;
+  background: rgba(11, 17, 31, 0.86);
+  backdrop-filter: blur(4px);
+  color: #f5f8ff;
+  font-size: 0.74rem;
+  line-height: 1.25;
+  pointer-events: none;
+}
+
+.api-usage-badge strong {
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #cdd8ef;
+}
+
+.api-usage-badge-low {
+  border-color: rgba(255, 120, 97, 0.55);
+  background: rgba(58, 18, 18, 0.9);
+}
+
 .layout {
   width: min(1100px, calc(100% - 1rem));
   margin: 1rem auto;
@@ -652,6 +682,14 @@ textarea {
 
 .profile-card {
   max-width: 920px;
+}
+
+.subscription-card .auth-actions {
+  align-items: flex-start;
+}
+
+.subscription-card .auth-actions p {
+  margin: 0;
 }
 
 .profile-grid {
@@ -1384,5 +1422,11 @@ textarea {
   .pitch-player {
     font-size: 0.68rem;
     padding: 0.12rem 0.44rem;
+  }
+
+  .api-usage-badge {
+    right: 10px;
+    bottom: 10px;
+    font-size: 0.71rem;
   }
 }

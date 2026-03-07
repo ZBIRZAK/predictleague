@@ -102,6 +102,10 @@ create table if not exists public.user_profiles (
   reminder_minutes_before integer not null default 30 check (reminder_minutes_before >= 5 and reminder_minutes_before <= 180),
   weekly_summary_enabled boolean not null default true,
   take_break_until timestamptz,
+  subscription_tier text not null default 'free' check (subscription_tier in ('free', 'pro')),
+  subscription_status text not null default 'inactive',
+  paypal_subscription_id text,
+  pro_expires_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -128,15 +132,25 @@ alter table public.user_profiles add column if not exists reminders_enabled bool
 alter table public.user_profiles add column if not exists reminder_minutes_before integer;
 alter table public.user_profiles add column if not exists weekly_summary_enabled boolean;
 alter table public.user_profiles add column if not exists take_break_until timestamptz;
+alter table public.user_profiles add column if not exists subscription_tier text;
+alter table public.user_profiles add column if not exists subscription_status text;
+alter table public.user_profiles add column if not exists paypal_subscription_id text;
+alter table public.user_profiles add column if not exists pro_expires_at timestamptz;
 update public.user_profiles set reminders_enabled = true where reminders_enabled is null;
 update public.user_profiles set reminder_minutes_before = 30 where reminder_minutes_before is null;
 update public.user_profiles set weekly_summary_enabled = true where weekly_summary_enabled is null;
+update public.user_profiles set subscription_tier = 'free' where subscription_tier is null;
+update public.user_profiles set subscription_status = 'inactive' where subscription_status is null;
 alter table public.user_profiles alter column reminders_enabled set default true;
 alter table public.user_profiles alter column reminder_minutes_before set default 30;
 alter table public.user_profiles alter column weekly_summary_enabled set default true;
+alter table public.user_profiles alter column subscription_tier set default 'free';
+alter table public.user_profiles alter column subscription_status set default 'inactive';
 alter table public.user_profiles alter column reminders_enabled set not null;
 alter table public.user_profiles alter column reminder_minutes_before set not null;
 alter table public.user_profiles alter column weekly_summary_enabled set not null;
+alter table public.user_profiles alter column subscription_tier set not null;
+alter table public.user_profiles alter column subscription_status set not null;
 
 alter table public.groups enable row level security;
 alter table public.group_members enable row level security;

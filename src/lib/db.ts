@@ -55,8 +55,22 @@ export type UserProfile = {
   reminder_minutes_before: number;
   weekly_summary_enabled: boolean;
   take_break_until: string | null;
+  subscription_tier: 'free' | 'pro';
+  subscription_status: string;
+  paypal_subscription_id: string | null;
+  pro_expires_at: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type BillingStatus = {
+  tier: 'free' | 'pro';
+  status: string;
+  proExpiresAt: string | null;
+  paypalSubscriptionId: string | null;
+  paypalConfigured: boolean;
+  paypalClientId: string | null;
+  paypalMode: 'sandbox' | 'live';
 };
 
 export type GroupBonusMatch = {
@@ -309,4 +323,22 @@ export async function loadGroupLeaderboard(params: {
     `/internal/db/groups/${encodeURIComponent(params.groupId)}/leaderboard?${query.toString()}`
   )) as GroupLeaderboard;
   return payload;
+}
+
+export async function loadBillingStatus() {
+  return (await authedFetch('/internal/billing/status')) as BillingStatus;
+}
+
+export async function createPayPalOrder() {
+  return (await authedFetch('/internal/billing/paypal/order', { method: 'POST' })) as {
+    orderId: string;
+    approveUrl: string;
+  };
+}
+
+export async function capturePayPalOrder(orderId: string) {
+  return (await authedFetch('/internal/billing/paypal/capture', {
+    method: 'POST',
+    body: JSON.stringify({ orderId })
+  })) as { ok: boolean; tier: 'pro'; status: string; proExpiresAt: string | null };
 }

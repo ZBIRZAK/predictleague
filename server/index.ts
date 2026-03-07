@@ -21,6 +21,14 @@ const firebaseWebApiKey = process.env.FIREBASE_WEB_API_KEY ?? process.env.VITE_F
 const isProd = process.env.NODE_ENV === 'production';
 const supabaseUrl = process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? '';
 const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+const paypalClientId = process.env.PAYPAL_CLIENT_ID ?? '';
+const paypalClientSecret = process.env.PAYPAL_CLIENT_SECRET ?? '';
+const paypalMode = (process.env.PAYPAL_MODE ?? 'sandbox').toLowerCase() === 'live' ? 'live' : 'sandbox';
+const paypalPlanPriceUsd = Number(process.env.PAYWALL_PRO_PRICE_USD ?? 4.99);
+const appBaseUrl = process.env.APP_BASE_URL ?? 'http://localhost:5173';
+const freeMaxOwnedGroups = Number(process.env.FREE_MAX_OWNED_GROUPS ?? 1);
+const paypalApiBase =
+  paypalMode === 'live' ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com';
 
 const mailer =
   smtpUser && smtpPass
@@ -50,6 +58,18 @@ let smtpLastVerifyError: string | null = null;
 const inviteRateLimitStore = new Map<string, number[]>();
 const INVITE_RATE_WINDOW_MS = 60_000;
 const INVITE_RATE_LIMIT = 8;
+const footballApiUsageState: {
+  remainingMinute: number | null;
+  limitMinute: number | null;
+  resetInSeconds: number | null;
+  updatedAt: string | null;
+} = {
+  remainingMinute: null,
+  limitMinute: null,
+  resetInSeconds: null,
+  updatedAt: null
+};
+const footballApiUsageStreams = new Set<express.Response>();
 
 type AuthContext = {
   uid: string;
@@ -169,6 +189,41 @@ function isValidEmail(value: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
 
+function parseHeaderNumber(headers: Headers, keys: string[]) {
+  for (const key of keys) {
+    const raw = headers.get(key);
+    if (!raw) continue;
+    const value = Number(raw);
+    if (Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function updateFootballApiUsage(headers: Headers) {
+  footballApiUsageState.remainingMinute = parseHeaderNumber(headers, [
+    'x-requests-available-minute',
+    'x-ratelimit-remaining',
+    'x-rate-limit-remaining'
+  ]);
+  footballApiUsageState.limitMinute = parseHeaderNumber(headers, [
+    'x-requests-limit-minute',
+    'x-ratelimit-limit',
+    'x-rate-limit-limit'
+  ]);
+  footballApiUsageState.resetInSeconds = parseHeaderNumber(headers, [
+    'x-requests-reset',
+    'x-ratelimit-reset',
+    'x-rate-limit-reset'
+  ]);
+  footballApiUsageState.updatedAt = new Date().toISOString();
+  const payload = `data: ${JSON.stringify(footballApiUsageState)}\n\n`;
+  for (const stream of footballApiUsageStreams) {
+    stream.write(payload);
+  }
+}
+
 function requireSupabaseAdmin(res: express.Response) {
   if (!supabaseAdmin) {
     res.status(500).json({
@@ -177,6 +232,41 @@ function requireSupabaseAdmin(res: express.Response) {
     return null;
   }
   return supabaseAdmin;
+}
+
+function hasPayPalConfig() {
+  return Boolean(paypalClientId && paypalClientSecret);
+}
+
+async function getPayPalAccessToken() {
+  const auth = Buffer.from(`${paypalClientId}:${paypalClientSecret}`).toString('base64');
+  const response = await fetch(`${paypalApiBase}/v1/oauth2/token`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${auth}`,
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    body: 'grant_type=client_credentials'
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as { error_description?: string };
+    throw new Error(payload.error_description ?? 'Failed to authenticate with PayPal.');
+  }
+  const payload = (await response.json()) as { access_token: string };
+  return payload.access_token;
+}
+
+async function paypalRequest(pathname: string, options: RequestInit = {}) {
+  if (!hasPayPalConfig()) {
+    throw new Error('PayPal is not configured on server.');
+  }
+  const token = await getPayPalAccessToken();
+  const headers = new Headers(options.headers);
+  headers.set('Authorization', `Bearer ${token}`);
+  if (options.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  return fetch(`${paypalApiBase}${pathname}`, { ...options, headers });
 }
 
 async function loadGroupMembership(groupId: string, userUid: string) {
@@ -229,6 +319,7 @@ async function fetchMatchById(apiKey: string, matchId: number) {
       Accept: 'application/json'
     }
   });
+  updateFootballApiUsage(response.headers);
   if (!response.ok) {
     return null;
   }
@@ -310,6 +401,29 @@ app.get('/internal/smtp-health', requireFirebaseAuth, async (req: AuthedRequest,
     smtpFrom: smtpFrom ? `${smtpFrom.slice(0, 2)}***` : '[missing]',
     lastVerifyAt: smtpLastVerifyAt,
     lastVerifyError: smtpLastVerifyError
+  });
+});
+
+app.get('/internal/api-usage', (_req, res) => {
+  res.status(200).json(footballApiUsageState);
+});
+
+app.get('/internal/api-usage/stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  footballApiUsageStreams.add(res);
+  res.write(`data: ${JSON.stringify(footballApiUsageState)}\n\n`);
+
+  const keepAliveId = setInterval(() => {
+    res.write(': keepalive\n\n');
+  }, 25000);
+
+  req.on('close', () => {
+    clearInterval(keepAliveId);
+    footballApiUsageStreams.delete(res);
   });
 });
 
@@ -453,6 +567,28 @@ app.post('/internal/db/groups', requireFirebaseAuth, async (req: AuthedRequest, 
   const normalizedBonusEnabled = Boolean(bonusEnabled);
 
   try {
+    const { data: profile } = await admin
+      .from('user_profiles')
+      .select('subscription_tier')
+      .eq('user_uid', ownerUid)
+      .maybeSingle<{ subscription_tier?: string | null }>();
+    const tier = (profile?.subscription_tier ?? 'free').toLowerCase();
+    if (tier !== 'pro') {
+      const { count, error: countError } = await admin
+        .from('groups')
+        .select('id', { count: 'exact', head: true })
+        .eq('owner_uid', ownerUid);
+      if (countError) {
+        throw new Error(countError.message);
+      }
+      if ((count ?? 0) >= freeMaxOwnedGroups) {
+        res
+          .status(402)
+          .json({ error: `Free plan limit reached (${freeMaxOwnedGroups} groups). Upgrade to Pro for unlimited groups.` });
+        return;
+      }
+    }
+
     const { data: group, error: groupError } = await admin
       .from('groups')
       .insert({
@@ -482,6 +618,124 @@ app.post('/internal/db/groups', requireFirebaseAuth, async (req: AuthedRequest, 
     res.status(200).json({ group });
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to create group.' });
+  }
+});
+
+app.get('/internal/billing/status', requireFirebaseAuth, async (req: AuthedRequest, res) => {
+  const admin = requireSupabaseAdmin(res);
+  if (!admin) return;
+  const userUid = req.auth?.uid ?? '';
+
+  try {
+    const { data, error } = await admin
+      .from('user_profiles')
+      .select('subscription_tier,subscription_status,pro_expires_at,paypal_subscription_id')
+      .eq('user_uid', userUid)
+      .maybeSingle<{
+        subscription_tier?: string | null;
+        subscription_status?: string | null;
+        pro_expires_at?: string | null;
+        paypal_subscription_id?: string | null;
+      }>();
+    if (error) throw new Error(error.message);
+
+    res.status(200).json({
+      tier: (data?.subscription_tier ?? 'free').toLowerCase(),
+      status: data?.subscription_status ?? 'inactive',
+      proExpiresAt: data?.pro_expires_at ?? null,
+      paypalSubscriptionId: data?.paypal_subscription_id ?? null,
+      paypalConfigured: hasPayPalConfig(),
+      paypalClientId: paypalClientId || null,
+      paypalMode
+    });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to load billing status.' });
+  }
+});
+
+app.post('/internal/billing/paypal/order', requireFirebaseAuth, async (req: AuthedRequest, res) => {
+  if (!hasPayPalConfig()) {
+    res.status(500).json({ error: 'PayPal credentials are missing on server.' });
+    return;
+  }
+
+  try {
+    const response = await paypalRequest('/v2/checkout/orders', {
+      method: 'POST',
+      body: JSON.stringify({
+        intent: 'CAPTURE',
+        purchase_units: [
+          {
+            description: 'PredictLeague Pro Monthly',
+            amount: { currency_code: 'USD', value: paypalPlanPriceUsd.toFixed(2) }
+          }
+        ],
+        application_context: {
+          return_url: `${appBaseUrl}/?paypal=success`,
+          cancel_url: `${appBaseUrl}/?paypal=cancel`,
+          brand_name: 'PredictLeague',
+          user_action: 'PAY_NOW'
+        }
+      })
+    });
+    const payload = (await response.json()) as {
+      id?: string;
+      links?: Array<{ rel?: string; href?: string }>;
+      message?: string;
+    };
+    if (!response.ok || !payload.id) {
+      throw new Error(payload.message ?? 'Failed to create PayPal order.');
+    }
+    const approveUrl = payload.links?.find((link) => link.rel === 'approve')?.href ?? '';
+    res.status(200).json({ orderId: payload.id, approveUrl });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to create PayPal order.' });
+  }
+});
+
+app.post('/internal/billing/paypal/capture', requireFirebaseAuth, async (req: AuthedRequest, res) => {
+  const admin = requireSupabaseAdmin(res);
+  if (!admin) return;
+  if (!hasPayPalConfig()) {
+    res.status(500).json({ error: 'PayPal credentials are missing on server.' });
+    return;
+  }
+
+  const { orderId } = req.body as { orderId?: string };
+  if (!orderId?.trim()) {
+    res.status(400).json({ error: 'orderId is required.' });
+    return;
+  }
+
+  try {
+    const response = await paypalRequest(`/v2/checkout/orders/${encodeURIComponent(orderId)}/capture`, {
+      method: 'POST',
+      body: JSON.stringify({})
+    });
+    const payload = (await response.json()) as { status?: string; message?: string };
+    if (!response.ok || payload.status !== 'COMPLETED') {
+      throw new Error(payload.message ?? 'PayPal capture did not complete.');
+    }
+
+    const userUid = req.auth?.uid ?? '';
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    const { error } = await admin.from('user_profiles').upsert(
+      {
+        user_uid: userUid,
+        email: req.auth?.email?.toLowerCase().trim() ?? '',
+        subscription_tier: 'pro',
+        subscription_status: 'active',
+        paypal_subscription_id: orderId,
+        pro_expires_at: expiresAt,
+        updated_at: new Date().toISOString()
+      },
+      { onConflict: 'user_uid' }
+    );
+    if (error) throw new Error(error.message);
+
+    res.status(200).json({ ok: true, tier: 'pro', status: 'active', proExpiresAt: expiresAt });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to capture PayPal order.' });
   }
 });
 
@@ -1114,6 +1368,7 @@ app.post('/internal/db/predictions', requireFirebaseAuth, async (req: AuthedRequ
         Accept: 'application/json'
       }
     });
+    updateFootballApiUsage(matchResponse.headers);
     if (!matchResponse.ok) {
       res.status(502).json({ error: 'Failed to validate match before saving prediction.' });
       return;
@@ -1276,6 +1531,7 @@ app.use('/api', async (req, res) => {
         Accept: 'application/json'
       }
     });
+    updateFootballApiUsage(upstreamResponse.headers);
 
     const contentType = upstreamResponse.headers.get('content-type');
     if (contentType) {

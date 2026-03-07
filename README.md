@@ -54,11 +54,22 @@ SMTP_USER=z.zbir@box-com.com
 SMTP_PASS=
 SMTP_FROM=z.zbir@box-com.com
 FIREBASE_WEB_API_KEY=
+PAYPAL_CLIENT_ID=
+PAYPAL_CLIENT_SECRET=
+PAYPAL_MODE=sandbox
+PAYWALL_PRO_PRICE_USD=4.99
+APP_BASE_URL=http://localhost:5173
+FREE_MAX_OWNED_GROUPS=1
 ```
 
 The API server reads this `.env` file when started via `npm run dev` or `npm run start`.
 Invite emails are sent by the backend route `/internal/invite-email` using the SMTP config above.
 This endpoint now requires a valid Firebase ID token in the `Authorization: Bearer ...` header.
+
+Billing/paywall:
+- Free users can create up to `FREE_MAX_OWNED_GROUPS` groups.
+- Pro plan uses PayPal checkout (`$4.99/mo` by default, configurable with `PAYWALL_PRO_PRICE_USD`).
+- Configure `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET` on the server to enable upgrade flow.
 
 Debug endpoint:
 - `GET /internal/smtp-health` is authenticated and available only outside production.

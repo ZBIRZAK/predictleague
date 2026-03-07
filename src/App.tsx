@@ -11,6 +11,9 @@ import {
 import {
   acceptPendingInvites,
   createGroup,
+  createPayPalOrder,
+  capturePayPalOrder,
+  loadBillingStatus,
   loadGroupBonusMatches,
   loadGroupLeaderboard,
   loadGroupMembers,
@@ -29,6 +32,7 @@ import {
   type GroupLeaderboard,
   type GroupInvite,
   type MatchPrediction,
+  type BillingStatus,
   type UserProfile
 } from './lib/db';
 import { firebaseAuth } from './lib/firebase';
@@ -158,6 +162,12 @@ type ResponsiblePlayForm = {
 };
 
 type AppPage = 'home' | 'game' | 'profile';
+type ApiUsage = {
+  remainingMinute: number | null;
+  limitMinute: number | null;
+  resetInSeconds: number | null;
+  updatedAt: string | null;
+};
 
 const statuses: Array<{ label: string; value: StatusFilter }> = [
   { label: 'All', value: '' },
@@ -375,6 +385,9 @@ function App() {
   const [profileRecord, setProfileRecord] = useState<UserProfile | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileSaving, setProfileSaving] = useState(false);
+  const [billingStatus, setBillingStatus] = useState<BillingStatus | null>(null);
+  const [billingLoading, setBillingLoading] = useState(false);
+  const [billingBusy, setBillingBusy] = useState(false);
   const [responsibleForm, setResponsibleForm] = useState<ResponsiblePlayForm>({
     remindersEnabled: true,
     reminderMinutesBefore: '30',
@@ -383,6 +396,7 @@ function App() {
   });
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  const [apiUsage, setApiUsage] = useState<ApiUsage | null>(null);
 
   const [competitions, setCompetitions] = useState<Competition[]>([]);
   const [publicMatches, setPublicMatches] = useState<Match[]>([]);
@@ -506,6 +520,9 @@ function App() {
   }, []);
 
   const groupLeaderboard = groupLeaderboardData?.leaderboard ?? [];
+  const freeGroupLimit = 1;
+  const isFreePlan = billingStatus?.tier !== 'pro';
+  const hasReachedFreeGroupLimit = isFreePlan && groups.length >= freeGroupLimit;
 
   const completedDraftCount = useMemo(() => {
     let total = 0;
@@ -566,6 +583,7 @@ function App() {
       setGroups([]);
       setSelectedGroupId('');
       setProfileRecord(null);
+      setBillingStatus(null);
       setProfileForm({
         firstName: '',
         lastName: '',
@@ -580,6 +598,69 @@ function App() {
 
     void bootstrapForUser(user);
     void loadProfileForUser(user);
+    void loadBillingForUser(user);
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+
+    const params = new URLSearchParams(window.location.search);
+    const paypalState = params.get('paypal');
+    if (!paypalState) return;
+
+    const clearPaypalQuery = () => {
+      const nextParams = new URLSearchParams(window.location.search);
+      nextParams.delete('paypal');
+      nextParams.delete('token');
+      nextParams.delete('PayerID');
+      const nextQuery = nextParams.toString();
+      const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ''}${window.location.hash}`;
+      window.history.replaceState({}, '', nextUrl);
+    };
+
+    if (paypalState === 'cancel') {
+      setMessage('PayPal checkout canceled.');
+      clearPaypalQuery();
+      return;
+    }
+
+    if (paypalState !== 'success') {
+      clearPaypalQuery();
+      return;
+    }
+
+    const orderId = params.get('token');
+    if (!orderId) {
+      setError('Missing PayPal order token.');
+      clearPaypalQuery();
+      return;
+    }
+
+    let cancelled = false;
+    const captureOrder = async () => {
+      try {
+        setBillingBusy(true);
+        setError('');
+        await capturePayPalOrder(orderId);
+        if (cancelled) return;
+        await loadBillingForUser(user);
+        setMessage('Payment successful. Pro plan is now active.');
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : 'Failed to confirm PayPal payment.');
+        }
+      } finally {
+        if (!cancelled) {
+          setBillingBusy(false);
+        }
+        clearPaypalQuery();
+      }
+    };
+
+    void captureOrder();
+    return () => {
+      cancelled = true;
+    };
   }, [user]);
 
   useEffect(() => {
@@ -622,6 +703,64 @@ function App() {
       break;
     }
   }, [groupMatches, myPredictions, selectedGroup, user]);
+
+  useEffect(() => {
+    let mounted = true;
+    let source: EventSource | null = null;
+
+    const loadApiUsage = async () => {
+      try {
+        const response = await fetch('/internal/api-usage');
+        if (!response.ok) return;
+        const payload = (await response.json()) as ApiUsage;
+        if (mounted) {
+          setApiUsage(payload);
+        }
+      } catch {
+        // Ignore usage badge refresh errors.
+      }
+    };
+
+    void loadApiUsage();
+    try {
+      source = new EventSource('/internal/api-usage/stream');
+      source.onmessage = (event) => {
+        if (!mounted) return;
+        try {
+          const payload = JSON.parse(event.data) as ApiUsage;
+          setApiUsage(payload);
+        } catch {
+          // Ignore malformed stream payloads.
+        }
+      };
+      source.onerror = () => {
+        // Stream may reconnect automatically; keep fallback polling active.
+      };
+    } catch {
+      // Ignore EventSource setup errors; polling fallback stays active.
+    }
+
+    const id = window.setInterval(() => {
+      void loadApiUsage();
+    }, 5000);
+
+    return () => {
+      mounted = false;
+      source?.close();
+      window.clearInterval(id);
+    };
+  }, []);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      setApiUsage((prev) => {
+        if (!prev || prev.resetInSeconds === null || prev.resetInSeconds <= 0) return prev;
+        return { ...prev, resetInSeconds: prev.resetInSeconds - 1 };
+      });
+    }, 1000);
+
+    return () => window.clearInterval(id);
+  }, []);
 
   async function loadCompetitions() {
     try {
@@ -752,6 +891,18 @@ function App() {
     }
   }
 
+  async function loadBillingForUser(_: User) {
+    try {
+      setBillingLoading(true);
+      const status = await loadBillingStatus();
+      setBillingStatus(status);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load billing status.');
+    } finally {
+      setBillingLoading(false);
+    }
+  }
+
   async function handleSaveProfile() {
     if (!user) {
       setError('You need to be logged in to save profile.');
@@ -791,6 +942,22 @@ function App() {
       setError(err instanceof Error ? err.message : 'Failed to save profile.');
     } finally {
       setProfileSaving(false);
+    }
+  }
+
+  async function handleUpgradeToPro() {
+    try {
+      setBillingBusy(true);
+      setError('');
+      const order = await createPayPalOrder();
+      if (!order.approveUrl) {
+        throw new Error('PayPal approval URL is missing.');
+      }
+      window.location.href = order.approveUrl;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to start PayPal checkout.');
+    } finally {
+      setBillingBusy(false);
     }
   }
 
@@ -1138,6 +1305,10 @@ function App() {
       setError('Login with a valid email account.');
       return;
     }
+    if (hasReachedFreeGroupLimit) {
+      setError('Free plan allows only 1 group. Upgrade to Pro to create more groups.');
+      return;
+    }
 
     const selectedCompetition = competitions.find((item) => String(item.id) === newGroupCompetitionId);
     if (!newGroupName.trim() || !selectedCompetition) {
@@ -1366,6 +1537,8 @@ function App() {
   const headerContextLabel =
     page === 'home' ? 'Home Matches' : page === 'game' ? 'Game' : user ? 'Your Profile' : 'Profile';
   const isGroupOwner = Boolean(user && selectedGroup && selectedGroup.owner_uid === user.uid);
+  const apiUsageKnown = apiUsage?.remainingMinute !== null && apiUsage?.remainingMinute !== undefined;
+  const apiUsageLow = apiUsageKnown && (apiUsage?.remainingMinute ?? 0) <= 2;
 
   return (
     <div className="app">
@@ -1862,6 +2035,11 @@ function App() {
             <div className="game-side">
               <section className="filter-panel">
                 <h2>Create Group</h2>
+                <p className="muted">
+                  {isFreePlan
+                    ? `Free plan: ${groups.length}/${freeGroupLimit} group used.`
+                    : 'Pro plan: unlimited groups.'}
+                </p>
                 <div className="selectors">
                   <label>
                     Group Name
@@ -1878,8 +2056,13 @@ function App() {
                       ))}
                     </select>
                   </label>
-                  <button type="button" className="refresh" disabled={busy} onClick={() => void handleCreateGroup()}>
-                    Create
+                  <button
+                    type="button"
+                    className="refresh"
+                    disabled={busy || hasReachedFreeGroupLimit}
+                    onClick={() => void handleCreateGroup()}
+                  >
+                    {hasReachedFreeGroupLimit ? 'Limit Reached' : 'Create'}
                   </button>
                 </div>
               </section>
@@ -2271,129 +2454,168 @@ function App() {
                 </div>
               </article>
             ) : (
-              <section className="filter-panel profile-card">
-                <h2>Your Profile</h2>
-                {profileLoading ? <p className="muted">Loading profile...</p> : null}
-                <div className="selectors profile-grid">
-                  <label>
-                    Email
-                    <input value={user.email ?? ''} type="email" disabled />
-                  </label>
-                  <label>
-                    Display Name
-                    <input
-                      value={profileForm.displayName}
-                      onChange={(e) => setProfileForm((prev) => ({ ...prev, displayName: e.target.value }))}
-                      type="text"
-                    />
-                  </label>
-                  <label>
-                    First Name
-                    <input
-                      value={profileForm.firstName}
-                      onChange={(e) => setProfileForm((prev) => ({ ...prev, firstName: e.target.value }))}
-                      type="text"
-                      autoComplete="given-name"
-                    />
-                  </label>
-                  <label>
-                    Last Name
-                    <input
-                      value={profileForm.lastName}
-                      onChange={(e) => setProfileForm((prev) => ({ ...prev, lastName: e.target.value }))}
-                      type="text"
-                      autoComplete="family-name"
-                    />
-                  </label>
-                  <label>
-                    Country
-                    <input
-                      value={profileForm.country}
-                      onChange={(e) => setProfileForm((prev) => ({ ...prev, country: e.target.value }))}
-                      type="text"
-                      autoComplete="country-name"
-                    />
-                  </label>
-                  <label>
-                    Favorite Team
-                    <input
-                      value={profileForm.favoriteTeam}
-                      onChange={(e) => setProfileForm((prev) => ({ ...prev, favoriteTeam: e.target.value }))}
-                      type="text"
-                    />
-                  </label>
-                  <label className="profile-bio">
-                    Bio
-                    <textarea
-                      value={profileForm.bio}
-                      onChange={(e) => setProfileForm((prev) => ({ ...prev, bio: e.target.value }))}
-                      rows={5}
-                    />
-                  </label>
-                  <label>
-                    Match Reminders
-                    <select
-                      value={responsibleForm.remindersEnabled ? 'on' : 'off'}
-                      onChange={(e) =>
-                        setResponsibleForm((prev) => ({ ...prev, remindersEnabled: e.target.value === 'on' }))
-                      }
+              <>
+                <section className="filter-panel profile-card subscription-card">
+                  <h2>Plan & Billing</h2>
+                  {billingLoading ? <p className="muted">Loading billing status...</p> : null}
+                  <div className="points-list">
+                    <p>
+                      Current plan: <strong>{billingStatus?.tier === 'pro' ? 'Pro' : 'Free'}</strong>
+                    </p>
+                    <p>
+                      Billing status: <strong>{billingStatus?.status ?? 'inactive'}</strong>
+                    </p>
+                    {billingStatus?.proExpiresAt ? (
+                      <p>
+                        Pro expires at: <strong>{formatMatchDateTime(billingStatus.proExpiresAt)}</strong>
+                      </p>
+                    ) : null}
+                    <p className="muted">Free plan can create 1 group. Pro unlocks unlimited groups.</p>
+                  </div>
+                  <div className="auth-actions">
+                    {billingStatus?.tier !== 'pro' ? (
+                      <button
+                        type="button"
+                        className="refresh"
+                        disabled={billingBusy || billingLoading || !billingStatus?.paypalConfigured}
+                        onClick={() => void handleUpgradeToPro()}
+                      >
+                        {billingBusy ? 'Redirecting...' : 'Upgrade To Pro ($4.99/mo)'}
+                      </button>
+                    ) : null}
+                    {!billingStatus?.paypalConfigured ? (
+                      <p className="muted">PayPal is not configured yet. Add PAYPAL credentials in server .env.</p>
+                    ) : null}
+                    {billingStatus?.paypalConfigured ? (
+                      <p className="muted">Payment gateway: PayPal ({billingStatus.paypalMode})</p>
+                    ) : null}
+                  </div>
+                </section>
+
+                <section className="filter-panel profile-card">
+                  <h2>Your Profile</h2>
+                  {profileLoading ? <p className="muted">Loading profile...</p> : null}
+                  <div className="selectors profile-grid">
+                    <label>
+                      Email
+                      <input value={user.email ?? ''} type="email" disabled />
+                    </label>
+                    <label>
+                      Display Name
+                      <input
+                        value={profileForm.displayName}
+                        onChange={(e) => setProfileForm((prev) => ({ ...prev, displayName: e.target.value }))}
+                        type="text"
+                      />
+                    </label>
+                    <label>
+                      First Name
+                      <input
+                        value={profileForm.firstName}
+                        onChange={(e) => setProfileForm((prev) => ({ ...prev, firstName: e.target.value }))}
+                        type="text"
+                        autoComplete="given-name"
+                      />
+                    </label>
+                    <label>
+                      Last Name
+                      <input
+                        value={profileForm.lastName}
+                        onChange={(e) => setProfileForm((prev) => ({ ...prev, lastName: e.target.value }))}
+                        type="text"
+                        autoComplete="family-name"
+                      />
+                    </label>
+                    <label>
+                      Country
+                      <input
+                        value={profileForm.country}
+                        onChange={(e) => setProfileForm((prev) => ({ ...prev, country: e.target.value }))}
+                        type="text"
+                        autoComplete="country-name"
+                      />
+                    </label>
+                    <label>
+                      Favorite Team
+                      <input
+                        value={profileForm.favoriteTeam}
+                        onChange={(e) => setProfileForm((prev) => ({ ...prev, favoriteTeam: e.target.value }))}
+                        type="text"
+                      />
+                    </label>
+                    <label className="profile-bio">
+                      Bio
+                      <textarea
+                        value={profileForm.bio}
+                        onChange={(e) => setProfileForm((prev) => ({ ...prev, bio: e.target.value }))}
+                        rows={5}
+                      />
+                    </label>
+                    <label>
+                      Match Reminders
+                      <select
+                        value={responsibleForm.remindersEnabled ? 'on' : 'off'}
+                        onChange={(e) =>
+                          setResponsibleForm((prev) => ({ ...prev, remindersEnabled: e.target.value === 'on' }))
+                        }
+                      >
+                        <option value="on">On</option>
+                        <option value="off">Off</option>
+                      </select>
+                    </label>
+                    <label>
+                      Reminder Minutes Before Kickoff
+                      <input
+                        type="number"
+                        min={5}
+                        max={180}
+                        value={responsibleForm.reminderMinutesBefore}
+                        onChange={(e) =>
+                          setResponsibleForm((prev) => ({ ...prev, reminderMinutesBefore: e.target.value }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      Weekly Summary
+                      <select
+                        value={responsibleForm.weeklySummaryEnabled ? 'on' : 'off'}
+                        onChange={(e) =>
+                          setResponsibleForm((prev) => ({ ...prev, weeklySummaryEnabled: e.target.value === 'on' }))
+                        }
+                      >
+                        <option value="on">On</option>
+                        <option value="off">Off</option>
+                      </select>
+                    </label>
+                    <label>
+                      Take A Break Until
+                      <input
+                        type="datetime-local"
+                        value={responsibleForm.takeBreakUntil}
+                        onChange={(e) =>
+                          setResponsibleForm((prev) => ({ ...prev, takeBreakUntil: e.target.value }))
+                        }
+                      />
+                    </label>
+                  </div>
+                  <div className="auth-actions">
+                    <button type="button" className="refresh" disabled={profileSaving} onClick={() => void handleSaveProfile()}>
+                      {profileSaving ? 'Saving...' : 'Save Profile'}
+                    </button>
+                    <button
+                      type="button"
+                      className="details-btn"
+                      onClick={() => {
+                        setProfileForm(profileToForm(profileRecord));
+                        setResponsibleForm(profileToResponsibleForm(profileRecord));
+                      }}
+                      disabled={profileSaving}
                     >
-                      <option value="on">On</option>
-                      <option value="off">Off</option>
-                    </select>
-                  </label>
-                  <label>
-                    Reminder Minutes Before Kickoff
-                    <input
-                      type="number"
-                      min={5}
-                      max={180}
-                      value={responsibleForm.reminderMinutesBefore}
-                      onChange={(e) =>
-                        setResponsibleForm((prev) => ({ ...prev, reminderMinutesBefore: e.target.value }))
-                      }
-                    />
-                  </label>
-                  <label>
-                    Weekly Summary
-                    <select
-                      value={responsibleForm.weeklySummaryEnabled ? 'on' : 'off'}
-                      onChange={(e) =>
-                        setResponsibleForm((prev) => ({ ...prev, weeklySummaryEnabled: e.target.value === 'on' }))
-                      }
-                    >
-                      <option value="on">On</option>
-                      <option value="off">Off</option>
-                    </select>
-                  </label>
-                  <label>
-                    Take A Break Until
-                    <input
-                      type="datetime-local"
-                      value={responsibleForm.takeBreakUntil}
-                      onChange={(e) =>
-                        setResponsibleForm((prev) => ({ ...prev, takeBreakUntil: e.target.value }))
-                      }
-                    />
-                  </label>
-                </div>
-                <div className="auth-actions">
-                  <button type="button" className="refresh" disabled={profileSaving} onClick={() => void handleSaveProfile()}>
-                    {profileSaving ? 'Saving...' : 'Save Profile'}
-                  </button>
-                  <button
-                    type="button"
-                    className="details-btn"
-                    onClick={() => {
-                      setProfileForm(profileToForm(profileRecord));
-                      setResponsibleForm(profileToResponsibleForm(profileRecord));
-                    }}
-                    disabled={profileSaving}
-                  >
-                    Reset
-                  </button>
-                </div>
-              </section>
+                      Reset
+                    </button>
+                  </div>
+                </section>
+              </>
             )}
           </section>
         ) : null}
@@ -2542,6 +2764,17 @@ function App() {
         {message ? <p className="muted">{message}</p> : null}
         {busy ? <p className="muted">Working...</p> : null}
       </main>
+      <div className={`api-usage-badge ${apiUsageLow ? 'api-usage-badge-low' : ''}`}>
+        <strong>API Calls</strong>
+        <span>
+          {apiUsageKnown
+            ? `${apiUsage?.remainingMinute} left${apiUsage?.limitMinute ? ` / ${apiUsage.limitMinute}` : ''}`
+            : 'Waiting first API call...'}
+        </span>
+        {apiUsage?.resetInSeconds !== null && apiUsage?.resetInSeconds !== undefined ? (
+          <span>reset in {Math.max(0, apiUsage.resetInSeconds)}s</span>
+        ) : null}
+      </div>
       <footer className="app-footer">
         <div className="app-footer-inner">
           <p>Copyright © {new Date().getFullYear()} PredictLeague. All rights reserved.</p>
