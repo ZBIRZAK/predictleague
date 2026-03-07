@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import {
   createUserWithEmailAndPassword,
   GoogleAuthProvider,
@@ -283,6 +283,22 @@ function splitDisplayName(name: string | null | undefined) {
   return { firstName, lastName: rest.join(' ') };
 }
 
+function isValidEmailAddress(value: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function mapFirebaseAuthError(error: unknown, fallback: string) {
+  const message = error instanceof Error ? error.message : fallback;
+  if (!(error instanceof Error)) return message;
+  if (message.includes('auth/invalid-email')) return 'Enter a valid email address.';
+  if (message.includes('auth/email-already-in-use')) return 'This email is already registered. Try login instead.';
+  if (message.includes('auth/weak-password')) return 'Password is too weak. Use at least 8 characters.';
+  if (message.includes('auth/invalid-credential')) return 'Invalid email or password.';
+  if (message.includes('auth/too-many-requests')) return 'Too many attempts. Please try again later.';
+  if (message.includes('auth/popup-closed-by-user')) return 'Google sign-in popup was closed.';
+  return message;
+}
+
 function ImportantMatchCard({ match, onOpen }: { match: Match; onOpen: (match: Match) => Promise<void> }) {
   const [nowMs, setNowMs] = useState(() => Date.now());
 
@@ -337,6 +353,7 @@ function App() {
   const [user, setUser] = useState<User | null>(null);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
   const [signupProfile, setSignupProfile] = useState<ProfileForm>({
@@ -412,14 +429,27 @@ function App() {
   const [newGroupName, setNewGroupName] = useState('');
   const [newGroupCompetitionId, setNewGroupCompetitionId] = useState('');
   const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteSending, setInviteSending] = useState(false);
   const [busy, setBusy] = useState(false);
   const [savingAll, setSavingAll] = useState(false);
   const [groupMatchesLoading, setGroupMatchesLoading] = useState(false);
+  const [perfectCongratsMatch, setPerfectCongratsMatch] = useState<string | null>(null);
+  const shownPerfectCongratsRef = useRef<Set<string>>(new Set());
 
   const selectedGroup = useMemo(
     () => groups.find((group) => group.id === selectedGroupId) ?? null,
     [groups, selectedGroupId]
   );
+  const normalizedAuthEmail = email.trim().toLowerCase();
+  const normalizedInviteEmail = inviteEmail.trim().toLowerCase();
+  const isAuthEmailValid = isValidEmailAddress(normalizedAuthEmail);
+  const isSignupMode = authMode === 'signup';
+  const isSignupPasswordValid = password.length >= 8;
+  const doesPasswordMatch = password === confirmPassword;
+  const canSubmitAuth =
+    authMode === 'login'
+      ? isAuthEmailValid && password.length > 0
+      : isAuthEmailValid && isSignupPasswordValid && doesPasswordMatch;
   const yesterdayDate = useMemo(() => shiftLocalDate(today, -1), [today]);
   const tomorrowDate = useMemo(() => shiftLocalDate(today, 1), [today]);
 
@@ -576,6 +606,22 @@ function App() {
 
     void loadGroupLeaderboardData(selectedGroup.id, leaderboardScope);
   }, [leaderboardScope, selectedGroup?.id]);
+
+  useEffect(() => {
+    if (!selectedGroup || !user) return;
+    for (const match of groupMatches) {
+      const mine = myPredictions[match.id];
+      if (!mine) continue;
+      const points = calculatePredictionPoints(match, mine);
+      const isPerfect = points.ready && points.winner === 1 && points.ht === 1 && points.ft === 1;
+      if (!isPerfect) continue;
+      const key = `${selectedGroup.id}:${user.uid}:${match.id}`;
+      if (shownPerfectCongratsRef.current.has(key)) continue;
+      shownPerfectCongratsRef.current.add(key);
+      setPerfectCongratsMatch(`${match.homeTeam.name} vs ${match.awayTeam.name}`);
+      break;
+    }
+  }, [groupMatches, myPredictions, selectedGroup, user]);
 
   async function loadCompetitions() {
     try {
@@ -988,14 +1034,27 @@ function App() {
   }
 
   async function handleRegister() {
+    if (!isValidEmailAddress(email.trim().toLowerCase())) {
+      setError('Enter a valid email address.');
+      return;
+    }
+    if (password.length < 8) {
+      setError('Password must be at least 8 characters.');
+      return;
+    }
+    if (password !== confirmPassword) {
+      setError('Passwords do not match.');
+      return;
+    }
+
     try {
       setAuthLoading(true);
       setError('');
       setMessage('');
-      const credential = await createUserWithEmailAndPassword(firebaseAuth, email.trim(), password);
+      const credential = await createUserWithEmailAndPassword(firebaseAuth, email.trim().toLowerCase(), password);
       await upsertUserProfile({
         userUid: credential.user.uid,
-        email: credential.user.email ?? email.trim(),
+        email: credential.user.email ?? email.trim().toLowerCase(),
         firstName: signupProfile.firstName,
         lastName: signupProfile.lastName,
         displayName: signupProfile.displayName,
@@ -1003,22 +1062,33 @@ function App() {
         favoriteTeam: signupProfile.favoriteTeam,
         bio: signupProfile.bio
       });
+      setConfirmPassword('');
+      setPassword('');
       setMessage('Account created. You are signed in.');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Registration failed.');
+      setError(mapFirebaseAuthError(err, 'Registration failed.'));
     } finally {
       setAuthLoading(false);
     }
   }
 
   async function handleLogin() {
+    if (!isValidEmailAddress(email.trim().toLowerCase())) {
+      setError('Enter a valid email address.');
+      return;
+    }
+    if (!password) {
+      setError('Password is required.');
+      return;
+    }
+
     try {
       setAuthLoading(true);
       setError('');
       setMessage('');
-      await signInWithEmailAndPassword(firebaseAuth, email.trim(), password);
+      await signInWithEmailAndPassword(firebaseAuth, email.trim().toLowerCase(), password);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed.');
+      setError(mapFirebaseAuthError(err, 'Login failed.'));
     } finally {
       setAuthLoading(false);
     }
@@ -1047,7 +1117,7 @@ function App() {
       }
       setMessage('Signed in with Google.');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Google sign-in failed.');
+      setError(mapFirebaseAuthError(err, 'Google sign-in failed.'));
     } finally {
       setAuthLoading(false);
     }
@@ -1103,19 +1173,31 @@ function App() {
       return;
     }
 
-    if (!inviteEmail.trim()) {
+    if (!normalizedInviteEmail) {
       setError('Email is required.');
+      return;
+    }
+    if (!isValidEmailAddress(normalizedInviteEmail)) {
+      setError('Enter a valid email address.');
+      return;
+    }
+    if (normalizedInviteEmail === (user.email ?? '').trim().toLowerCase()) {
+      setError('You cannot invite your own email.');
+      return;
+    }
+    if (invites.some((invite) => invite.email.trim().toLowerCase() === normalizedInviteEmail && invite.status === 'pending')) {
+      setError('This email already has a pending invite.');
       return;
     }
 
     try {
-      setBusy(true);
+      setInviteSending(true);
       setError('');
       const idToken = await user.getIdToken();
       await inviteMember({
         groupId: selectedGroup.id,
         invitedByUid: user.uid,
-        email: inviteEmail
+        email: normalizedInviteEmail
       });
 
       const emailResponse = await fetch('/internal/invite-email', {
@@ -1125,33 +1207,40 @@ function App() {
           Authorization: `Bearer ${idToken}`
         },
         body: JSON.stringify({
-          toEmail: inviteEmail.trim(),
+          toEmail: normalizedInviteEmail,
           groupName: selectedGroup.name,
           inviterEmail: user.email ?? '',
           groupId: selectedGroup.id
         })
       });
+      let emailErrorMessage = '';
+      let emailPayload: { accepted?: string[]; rejected?: string[] } = {};
       if (!emailResponse.ok) {
         const payload = (await emailResponse.json().catch(() => ({}))) as { error?: string };
-        throw new Error(payload.error ?? 'Invite was saved, but failed to send email.');
+        emailErrorMessage = payload.error ?? 'Invite saved, but email delivery failed.';
+      } else {
+        emailPayload = (await emailResponse.json().catch(() => ({}))) as {
+          accepted?: string[];
+          rejected?: string[];
+        };
       }
-      const emailPayload = (await emailResponse.json().catch(() => ({}))) as {
-        accepted?: string[];
-        rejected?: string[];
-      };
 
       setInviteEmail('');
       const acceptedCount = emailPayload.accepted?.length ?? 0;
       const rejectedCount = emailPayload.rejected?.length ?? 0;
-      setMessage(
-        `Invite saved. Email status: accepted ${acceptedCount}, rejected ${rejectedCount}. User joins automatically when signing in with that email.`
-      );
+      if (emailErrorMessage) {
+        setMessage(`Invite saved in app. ${emailErrorMessage}`);
+      } else {
+        setMessage(
+          `Invite saved. Email status: accepted ${acceptedCount}, rejected ${rejectedCount}. User joins automatically when signing in with that email.`
+        );
+      }
       const nextInvites = await loadInvitesForGroup(selectedGroup.id);
       setInvites(nextInvites);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to invite member.');
     } finally {
-      setBusy(false);
+      setInviteSending(false);
     }
   }
 
@@ -1621,14 +1710,24 @@ function App() {
                 <button
                   type="button"
                   className={`chip ${authMode === 'login' ? 'chip-active' : ''}`}
-                  onClick={() => setAuthMode('login')}
+                  onClick={() => {
+                    setAuthMode('login');
+                    setConfirmPassword('');
+                    setError('');
+                    setMessage('');
+                  }}
                 >
                   Login
                 </button>
                 <button
                   type="button"
                   className={`chip ${authMode === 'signup' ? 'chip-active' : ''}`}
-                  onClick={() => setAuthMode('signup')}
+                  onClick={() => {
+                    setAuthMode('signup');
+                    setConfirmPassword('');
+                    setError('');
+                    setMessage('');
+                  }}
                 >
                   Sign up
                 </button>
@@ -1637,7 +1736,13 @@ function App() {
               <h3>{authMode === 'login' ? 'Welcome back' : 'Create your account'}</h3>
               <label>
                 Email
-                <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" autoComplete="email" />
+                <input
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  type="email"
+                  autoComplete="email"
+                  placeholder="name@example.com"
+                />
               </label>
               <label>
                 Password
@@ -1646,8 +1751,24 @@ function App() {
                   onChange={(e) => setPassword(e.target.value)}
                   type="password"
                   autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
+                  placeholder={authMode === 'login' ? 'Your password' : 'At least 8 characters'}
                 />
               </label>
+              {isSignupMode ? (
+                <>
+                  <label>
+                    Confirm Password
+                    <input
+                      value={confirmPassword}
+                      onChange={(e) => setConfirmPassword(e.target.value)}
+                      type="password"
+                      autoComplete="new-password"
+                      placeholder="Re-enter password"
+                    />
+                  </label>
+                  <p className="muted auth-hint">Use 8+ characters and keep your password secure.</p>
+                </>
+              ) : null}
               {authMode === 'signup' ? (
                 <div className="selectors auth-signup-grid">
                   <label>
@@ -1709,14 +1830,19 @@ function App() {
                   type="button"
                   className="refresh"
                   onClick={() => void (authMode === 'login' ? handleLogin() : handleRegister())}
-                  disabled={authLoading}
+                  disabled={authLoading || !canSubmitAuth}
                 >
                   {authLoading ? 'Please wait...' : authMode === 'login' ? 'Login' : 'Create account'}
                 </button>
                 <button
                   type="button"
                   className="details-btn"
-                  onClick={() => setAuthMode((prev) => (prev === 'login' ? 'signup' : 'login'))}
+                  onClick={() => {
+                    setAuthMode((prev) => (prev === 'login' ? 'signup' : 'login'));
+                    setConfirmPassword('');
+                    setError('');
+                    setMessage('');
+                  }}
                   disabled={authLoading}
                 >
                   {authMode === 'login' ? 'Need account?' : 'Have account?'}
@@ -1779,12 +1905,22 @@ function App() {
                 <section className="filter-panel">
                   <h2>Invite Friends</h2>
                   <div className="selectors">
-                    <label>
-                      Friend Email
-                      <input value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} type="email" />
-                    </label>
-                    <button type="button" className="refresh" disabled={busy} onClick={() => void handleInvite()}>
-                      Invite
+                  <label>
+                    Friend Email
+                    <input
+                      value={inviteEmail}
+                      onChange={(e) => setInviteEmail(e.target.value)}
+                      type="email"
+                      placeholder="friend@email.com"
+                    />
+                  </label>
+                    <button
+                      type="button"
+                      className="refresh"
+                      disabled={inviteSending || !normalizedInviteEmail}
+                      onClick={() => void handleInvite()}
+                    >
+                      {inviteSending ? 'Sending...' : 'Invite'}
                     </button>
                   </div>
                   <div className="invite-list">
@@ -1929,6 +2065,17 @@ function App() {
                   ) : null}
                 </section>
               ) : null}
+
+              <section className="filter-panel points-guide">
+                <h2>How Points Work</h2>
+                <div className="points-list">
+                  <p>Winner correct: <strong>+1</strong></p>
+                  <p>Half-time exact score: <strong>+1</strong></p>
+                  <p>Full-time exact score: <strong>+1</strong></p>
+                  <p>Perfect prediction (winner + HT + FT all correct): <strong>+2 bonus</strong></p>
+                  <p className="muted">Max normal score per match: 5 pts (group bonus multipliers can increase it).</p>
+                </div>
+              </section>
             </div>
 
             <div className="game-main">
@@ -2083,7 +2230,7 @@ function App() {
                                 <article className="reveal-card" key={item.id}>
                                   <div className="reveal-card-head">
                                     <strong>{memberEmailByUid[item.user_uid] ?? item.user_uid}</strong>
-                                    {points.ready ? <span className="reveal-points">{points.total}/3 pts</span> : null}
+                                    {points.ready ? <span className="reveal-points">{points.total} pts</span> : null}
                                   </div>
                                   <p className="reveal-match">{matchLabel}</p>
                                   <div className="reveal-scores">
@@ -2375,6 +2522,22 @@ function App() {
           </div>
         ) : null}
 
+        {perfectCongratsMatch ? (
+          <div className="modal-overlay" onClick={() => setPerfectCongratsMatch(null)}>
+            <section className="modal congrats-modal" onClick={(event) => event.stopPropagation()}>
+              <header className="modal-header">
+                <h3>Perfect Prediction!</h3>
+                <button type="button" onClick={() => setPerfectCongratsMatch(null)}>
+                  Close
+                </button>
+              </header>
+              <p className="congrats-text">
+                Congratulations! You nailed all picks for <strong>{perfectCongratsMatch}</strong> and earned the +2 perfect bonus.
+              </p>
+            </section>
+          </div>
+        ) : null}
+
         {error ? <p className="error">{error}</p> : null}
         {message ? <p className="muted">{message}</p> : null}
         {busy ? <p className="muted">Working...</p> : null}
@@ -2554,8 +2717,9 @@ function calculatePredictionPoints(match: Match, prediction: MatchPrediction): P
   const winner = predictedWinner === result.winner ? 1 : 0;
   const ht = prediction.ht_home === result.htHome && prediction.ht_away === result.htAway ? 1 : 0;
   const ft = prediction.ft_home === result.ftHome && prediction.ft_away === result.ftAway ? 1 : 0;
+  const perfectBonus = winner === 1 && ht === 1 && ft === 1 ? 2 : 0;
 
-  return { ready: true, winner, ht, ft, total: winner + ht + ft };
+  return { ready: true, winner, ht, ft, total: winner + ht + ft + perfectBonus };
 }
 
 function formatMatchDateTime(utcDate: string) {

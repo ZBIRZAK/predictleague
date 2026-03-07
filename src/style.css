@@ -640,6 +640,11 @@ textarea {
   font-weight: 600;
 }
 
+.auth-hint {
+  margin: -0.2rem 0 0;
+  font-size: 0.76rem;
+}
+
 .profile-shell {
   display: grid;
   gap: 0.9rem;
@@ -687,6 +692,31 @@ textarea {
   margin: 0;
   color: var(--text-soft);
   font-size: 0.88rem;
+}
+
+.points-guide {
+  gap: 0.5rem;
+}
+
+.points-list {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.points-list p {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 0.85rem;
+}
+
+.congrats-modal {
+  max-width: 520px;
+}
+
+.congrats-text {
+  margin: 0.4rem 0 0;
+  color: var(--text-soft);
+  line-height: 1.45;
 }
 
 .prediction-row {

@@ -271,7 +271,9 @@ function calculatePointsForPrediction(params: {
   const htPoints = params.prediction.ht_home === htHome && params.prediction.ht_away === htAway ? 1 : 0;
   const ftPoints = params.prediction.ft_home === ftHome && params.prediction.ft_away === ftAway ? 1 : 0;
   const baseTotal = winnerPoints + htPoints + ftPoints;
-  const bonusPoints = Math.max(0, Math.round(baseTotal * (params.bonusMultiplier - 1)));
+  const perfectBonusPoints = baseTotal === 3 ? 2 : 0;
+  const matchBonusPoints = Math.max(0, Math.round(baseTotal * (params.bonusMultiplier - 1)));
+  const bonusPoints = perfectBonusPoints + matchBonusPoints;
   const totalPoints = baseTotal + bonusPoints;
 
   return {
