@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { firebaseAuth } from './firebase';
 
 export type AppGroup = {
   id: string;
@@ -6,6 +6,8 @@ export type AppGroup = {
   competition_id: number;
   competition_name: string;
   owner_uid: string;
+  prediction_lock_minutes: number;
+  bonus_enabled: boolean;
   created_at: string;
 };
 
@@ -40,8 +42,81 @@ export type GroupMember = {
   created_at: string;
 };
 
-function toLowerTrim(value: string) {
-  return value.trim().toLowerCase();
+export type UserProfile = {
+  user_uid: string;
+  email: string;
+  first_name: string | null;
+  last_name: string | null;
+  display_name: string | null;
+  country: string | null;
+  favorite_team: string | null;
+  bio: string | null;
+  reminders_enabled: boolean;
+  reminder_minutes_before: number;
+  weekly_summary_enabled: boolean;
+  take_break_until: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type GroupBonusMatch = {
+  id: string;
+  group_id: string;
+  match_id: number;
+  label: string;
+  multiplier: number;
+  active: boolean;
+  created_at: string;
+};
+
+export type LeaderboardEntry = {
+  rank: number;
+  user_uid: string;
+  email: string;
+  points: number;
+  winner_count: number;
+  exact_ht_count: number;
+  exact_ft_count: number;
+  streak_days: number;
+  earliest_submission: string | null;
+};
+
+export type GroupLeaderboard = {
+  scope: 'total' | 'weekly';
+  weekStart: string;
+  weekEnd: string;
+  leaderboard: LeaderboardEntry[];
+  rounds: Array<{ round: number; total_points: number }>;
+};
+
+async function authedFetch(path: string, init: RequestInit = {}) {
+  const currentUser = firebaseAuth.currentUser;
+  if (!currentUser) {
+    throw new Error('User is not authenticated.');
+  }
+
+  const idToken = await currentUser.getIdToken();
+  const headers = new Headers(init.headers);
+  headers.set('Authorization', `Bearer ${idToken}`);
+  if (init.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+
+  const response = await fetch(path, {
+    ...init,
+    headers
+  });
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(payload.error ?? `Request failed (${response.status}).`);
+  }
+
+  if (response.status === 204) {
+    return null;
+  }
+
+  return response.json();
 }
 
 export async function createGroup(params: {
@@ -51,33 +126,18 @@ export async function createGroup(params: {
   competitionId: number;
   competitionName: string;
 }) {
-  const { data: group, error: groupError } = await supabase
-    .from('groups')
-    .insert({
-      owner_uid: params.ownerUid,
-      name: params.name.trim(),
-      competition_id: params.competitionId,
-      competition_name: params.competitionName
+  const payload = (await authedFetch('/internal/db/groups', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: params.name,
+      competitionId: params.competitionId,
+      competitionName: params.competitionName,
+      predictionLockMinutes: 5,
+      bonusEnabled: false
     })
-    .select('*')
-    .single<AppGroup>();
+  })) as { group: AppGroup };
 
-  if (groupError || !group) {
-    throw new Error(groupError?.message ?? 'Failed to create group.');
-  }
-
-  const { error: memberError } = await supabase.from('group_members').insert({
-    group_id: group.id,
-    user_uid: params.ownerUid,
-    email: toLowerTrim(params.ownerEmail),
-    role: 'owner'
-  });
-
-  if (memberError) {
-    throw new Error(memberError.message);
-  }
-
-  return group;
+  return payload.group;
 }
 
 export async function inviteMember(params: {
@@ -85,155 +145,60 @@ export async function inviteMember(params: {
   invitedByUid: string;
   email: string;
 }) {
-  const normalizedEmail = toLowerTrim(params.email);
-  const { error } = await supabase.from('group_invites').upsert(
-    {
-      group_id: params.groupId,
-      invited_by_uid: params.invitedByUid,
-      email: normalizedEmail,
-      status: 'pending'
-    },
-    { onConflict: 'group_id,email' }
-  );
-
-  if (error) {
-    throw new Error(error.message);
-  }
+  await authedFetch('/internal/db/invites', {
+    method: 'POST',
+    body: JSON.stringify({
+      groupId: params.groupId,
+      email: params.email
+    })
+  });
 }
 
-export async function acceptPendingInvites(params: { userUid: string; userEmail: string }) {
-  const normalizedEmail = toLowerTrim(params.userEmail);
-  const { data: invites, error: inviteError } = await supabase
-    .from('group_invites')
-    .select('*')
-    .eq('email', normalizedEmail)
-    .eq('status', 'pending')
-    .returns<GroupInvite[]>();
-
-  if (inviteError) {
-    throw new Error(inviteError.message);
-  }
-
-  if (!invites || invites.length === 0) {
-    return 0;
-  }
-
-  for (const invite of invites) {
-    const { error: memberError } = await supabase.from('group_members').upsert(
-      {
-        group_id: invite.group_id,
-        user_uid: params.userUid,
-        email: normalizedEmail,
-        role: 'member'
-      },
-      { onConflict: 'group_id,user_uid' }
-    );
-
-    if (memberError) {
-      throw new Error(memberError.message);
-    }
-  }
-
-  const inviteIds = invites.map((invite) => invite.id);
-  const { error: updateError } = await supabase
-    .from('group_invites')
-    .update({ status: 'accepted', accepted_at: new Date().toISOString() })
-    .in('id', inviteIds);
-
-  if (updateError) {
-    throw new Error(updateError.message);
-  }
-
-  return invites.length;
+export async function acceptPendingInvites(_: { userUid: string; userEmail: string }) {
+  const payload = (await authedFetch('/internal/db/invites/accept', {
+    method: 'POST'
+  })) as { acceptedCount: number };
+  return payload.acceptedCount ?? 0;
 }
 
-export async function loadGroupsForUser(userUid: string) {
-  const { data: memberships, error: membershipError } = await supabase
-    .from('group_members')
-    .select('group_id')
-    .eq('user_uid', userUid);
-
-  if (membershipError) {
-    throw new Error(membershipError.message);
-  }
-
-  const groupIds = Array.from(new Set((memberships ?? []).map((row) => row.group_id)));
-  if (groupIds.length === 0) {
-    return [];
-  }
-
-  const { data: groups, error: groupError } = await supabase
-    .from('groups')
-    .select('*')
-    .in('id', groupIds)
-    .order('created_at', { ascending: false })
-    .returns<AppGroup[]>();
-
-  if (groupError) {
-    throw new Error(groupError.message);
-  }
-
-  return groups ?? [];
+export async function loadGroupsForUser(_: string) {
+  const payload = (await authedFetch('/internal/db/groups')) as { groups: AppGroup[] };
+  return payload.groups ?? [];
 }
 
 export async function loadInvitesForGroup(groupId: string) {
-  const { data, error } = await supabase
-    .from('group_invites')
-    .select('*')
-    .eq('group_id', groupId)
-    .order('created_at', { ascending: false })
-    .returns<GroupInvite[]>();
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  return data ?? [];
+  const payload = (await authedFetch(`/internal/db/groups/${encodeURIComponent(groupId)}/invites`)) as {
+    invites: GroupInvite[];
+  };
+  return payload.invites ?? [];
 }
 
 export async function loadPredictionsForUser(params: { groupId: string; userUid: string; matchDate: string }) {
-  const { data, error } = await supabase
-    .from('predictions')
-    .select('*')
-    .eq('group_id', params.groupId)
-    .eq('user_uid', params.userUid)
-    .eq('match_date', params.matchDate)
-    .returns<MatchPrediction[]>();
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  return data ?? [];
+  const query = new URLSearchParams({ mine: '1', matchDate: params.matchDate });
+  const payload = (await authedFetch(
+    `/internal/db/groups/${encodeURIComponent(params.groupId)}/predictions?${query.toString()}`
+  )) as { predictions: MatchPrediction[] };
+  return payload.predictions ?? [];
 }
 
 export async function loadPredictionsForGroup(params: { groupId: string; matchDate?: string }) {
-  let query = supabase.from('predictions').select('*').eq('group_id', params.groupId);
+  const query = new URLSearchParams();
   if (params.matchDate) {
-    query = query.eq('match_date', params.matchDate);
+    query.set('matchDate', params.matchDate);
   }
 
-  const { data, error } = await query.returns<MatchPrediction[]>();
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  return data ?? [];
+  const path = `/internal/db/groups/${encodeURIComponent(params.groupId)}/predictions${
+    query.toString() ? `?${query.toString()}` : ''
+  }`;
+  const payload = (await authedFetch(path)) as { predictions: MatchPrediction[] };
+  return payload.predictions ?? [];
 }
 
 export async function loadGroupMembers(groupId: string) {
-  const { data, error } = await supabase
-    .from('group_members')
-    .select('*')
-    .eq('group_id', groupId)
-    .returns<GroupMember[]>();
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  return data ?? [];
+  const payload = (await authedFetch(`/internal/db/groups/${encodeURIComponent(groupId)}/members`)) as {
+    members: GroupMember[];
+  };
+  return payload.members ?? [];
 }
 
 export async function savePrediction(input: {
@@ -246,21 +211,102 @@ export async function savePrediction(input: {
   ftHome: number;
   ftAway: number;
 }) {
-  const { error } = await supabase.from('predictions').upsert(
-    {
-      group_id: input.groupId,
-      user_uid: input.userUid,
-      match_id: input.matchId,
-      match_date: input.matchDate,
-      ht_home: input.htHome,
-      ht_away: input.htAway,
-      ft_home: input.ftHome,
-      ft_away: input.ftAway
-    },
-    { onConflict: 'group_id,match_id,user_uid' }
-  );
+  await authedFetch('/internal/db/predictions', {
+    method: 'POST',
+    body: JSON.stringify({
+      groupId: input.groupId,
+      matchId: input.matchId,
+      matchDate: input.matchDate,
+      htHome: input.htHome,
+      htAway: input.htAway,
+      ftHome: input.ftHome,
+      ftAway: input.ftAway
+    })
+  });
+}
 
-  if (error) {
-    throw new Error(error.message);
+export async function loadUserProfile(_: string) {
+  const payload = (await authedFetch('/internal/db/profile')) as { profile: UserProfile | null };
+  return payload.profile;
+}
+
+export async function upsertUserProfile(input: {
+  userUid: string;
+  email: string;
+  firstName?: string;
+  lastName?: string;
+  displayName?: string;
+  country?: string;
+  favoriteTeam?: string;
+  bio?: string;
+  remindersEnabled?: boolean;
+  reminderMinutesBefore?: number;
+  weeklySummaryEnabled?: boolean;
+  takeBreakUntil?: string | null;
+}) {
+  await authedFetch('/internal/db/profile', {
+    method: 'PUT',
+    body: JSON.stringify({
+      firstName: input.firstName,
+      lastName: input.lastName,
+      displayName: input.displayName,
+      country: input.country,
+      favoriteTeam: input.favoriteTeam,
+      bio: input.bio,
+      remindersEnabled: input.remindersEnabled,
+      reminderMinutesBefore: input.reminderMinutesBefore,
+      weeklySummaryEnabled: input.weeklySummaryEnabled,
+      takeBreakUntil: input.takeBreakUntil
+    })
+  });
+}
+
+export async function updateGroupSettings(params: {
+  groupId: string;
+  predictionLockMinutes: number;
+  bonusEnabled: boolean;
+}) {
+  const payload = (await authedFetch(`/internal/db/groups/${encodeURIComponent(params.groupId)}/settings`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      predictionLockMinutes: params.predictionLockMinutes,
+      bonusEnabled: params.bonusEnabled
+    })
+  })) as { group: AppGroup };
+
+  return payload.group;
+}
+
+export async function loadGroupBonusMatches(groupId: string) {
+  const payload = (await authedFetch(`/internal/db/groups/${encodeURIComponent(groupId)}/bonus-matches`)) as {
+    bonusMatches: GroupBonusMatch[];
+  };
+  return payload.bonusMatches ?? [];
+}
+
+export async function upsertGroupBonusMatches(
+  groupId: string,
+  items: Array<{ matchId: number; label?: string; multiplier?: number; active?: boolean }>
+) {
+  const payload = (await authedFetch(`/internal/db/groups/${encodeURIComponent(groupId)}/bonus-matches`, {
+    method: 'PUT',
+    body: JSON.stringify({ items })
+  })) as { bonusMatches: GroupBonusMatch[] };
+  return payload.bonusMatches ?? [];
+}
+
+export async function loadGroupLeaderboard(params: {
+  groupId: string;
+  scope: 'total' | 'weekly';
+  referenceDate?: string;
+}) {
+  const query = new URLSearchParams({ scope: params.scope });
+  if (params.referenceDate) {
+    query.set('referenceDate', params.referenceDate);
   }
+
+  const payload = (await authedFetch(
+    `/internal/db/groups/${encodeURIComponent(params.groupId)}/leaderboard?${query.toString()}`
+  )) as GroupLeaderboard;
+  return payload;
 }

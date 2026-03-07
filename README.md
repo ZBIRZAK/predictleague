@@ -8,8 +8,9 @@ A football web app inspired by 365scores style, powered by [football-data.org](h
 - Backend proxy: Express (`server/index.ts`)
 - All app API calls go to `/api/v4/...` on the backend
 - The backend injects `X-Auth-Token` from server env (`FOOTBALL_DATA_API_KEY`)
-- Authentication: Firebase Email/Password
+- Authentication: Firebase Email/Password + Google Sign-In
 - Data storage (groups, invites, predictions): Supabase Postgres
+- Authenticated backend DB routes: `/internal/db/...` (groups, invites, predictions, profile)
 
 This keeps the API key server-side in production and avoids exposing it in browser code.
 
@@ -44,35 +45,41 @@ VITE_FIREBASE_MESSAGING_SENDER_ID=
 VITE_FIREBASE_APP_ID=
 VITE_SUPABASE_URL=
 VITE_SUPABASE_ANON_KEY=
+SUPABASE_URL=
+SUPABASE_SERVICE_ROLE_KEY=
 SMTP_HOST=smtp.mail.ovh.ca
 SMTP_PORT=587
 SMTP_SECURE=false
 SMTP_USER=z.zbir@box-com.com
 SMTP_PASS=
 SMTP_FROM=z.zbir@box-com.com
+FIREBASE_WEB_API_KEY=
 ```
 
 The API server reads this `.env` file when started via `npm run dev` or `npm run start`.
 Invite emails are sent by the backend route `/internal/invite-email` using the SMTP config above.
+This endpoint now requires a valid Firebase ID token in the `Authorization: Bearer ...` header.
 
 Debug endpoint:
-- `GET /internal/smtp-health` returns SMTP config/verify status from the backend.
+- `GET /internal/smtp-health` is authenticated and available only outside production.
 
 ## Supabase Setup
 
 1. Create a Supabase project.
 2. In SQL editor, run [schema.sql](/Users/mac/Documents/apps/predictleague/supabase/schema.sql).
-3. Put project URL and anon key in `.env`.
+3. Put project values in `.env` (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`).
 
 Security note:
-- Current schema uses MVP RLS policies compatible with Firebase-auth-only clients.
-- For production, move Supabase writes/reads behind your Node backend (service role key) and validate Firebase ID tokens server-side.
+- Current schema blocks direct anon-key reads/writes from the client.
+- Backend validates Firebase ID tokens and performs DB operations with the Supabase service role key.
+- Never expose `SUPABASE_SERVICE_ROLE_KEY` in frontend variables.
 
 ## Firebase Setup
 
 1. Create a Firebase project.
 2. Enable Authentication -> Email/Password.
-3. Copy web app config values into `.env` (`VITE_FIREBASE_*`).
+3. Enable Authentication -> Google.
+4. Copy web app config values into `.env` (`VITE_FIREBASE_*`).
 
 ## Development
 

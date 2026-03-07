@@ -1,24 +1,35 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import {
   createUserWithEmailAndPassword,
+  GoogleAuthProvider,
   onAuthStateChanged,
   signInWithEmailAndPassword,
+  signInWithPopup,
   signOut,
   type User
 } from 'firebase/auth';
 import {
   acceptPendingInvites,
   createGroup,
+  loadGroupBonusMatches,
+  loadGroupLeaderboard,
   loadGroupMembers,
+  loadUserProfile,
   inviteMember,
   loadGroupsForUser,
   loadInvitesForGroup,
   loadPredictionsForGroup,
   savePrediction,
+  updateGroupSettings,
+  upsertUserProfile,
+  upsertGroupBonusMatches,
   type AppGroup,
+  type GroupBonusMatch,
   type GroupMember,
+  type GroupLeaderboard,
   type GroupInvite,
-  type MatchPrediction
+  type MatchPrediction,
+  type UserProfile
 } from './lib/db';
 import { firebaseAuth } from './lib/firebase';
 import {
@@ -130,7 +141,23 @@ type PredictionDraft = {
   ftAway: string;
 };
 
-type AppPage = 'home' | 'game';
+type ProfileForm = {
+  firstName: string;
+  lastName: string;
+  displayName: string;
+  country: string;
+  favoriteTeam: string;
+  bio: string;
+};
+
+type ResponsiblePlayForm = {
+  remindersEnabled: boolean;
+  reminderMinutesBefore: string;
+  weeklySummaryEnabled: boolean;
+  takeBreakUntil: string;
+};
+
+type AppPage = 'home' | 'game' | 'profile';
 
 const statuses: Array<{ label: string; value: StatusFilter }> = [
   { label: 'All', value: '' },
@@ -140,7 +167,9 @@ const statuses: Array<{ label: string; value: StatusFilter }> = [
 ];
 
 function getPageFromHash(hash: string): AppPage {
-  return hash === '#/game' ? 'game' : 'home';
+  if (hash === '#/game') return 'game';
+  if (hash === '#/profile') return 'profile';
+  return 'home';
 }
 
 function formatSeasonLabel(startYear: string) {
@@ -161,6 +190,145 @@ function getCurrentSeasonStartYear(now: Date = new Date()) {
   return month >= 6 ? year : year - 1;
 }
 
+function formatCountdown(ms: number) {
+  if (ms <= 0) return '00:00:00';
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function colorFromText(input: string, saturation = 70, lightness = 48) {
+  let hash = 0;
+  for (let i = 0; i < input.length; i += 1) {
+    hash = (hash << 5) - hash + input.charCodeAt(i);
+    hash |= 0;
+  }
+  const hue = Math.abs(hash) % 360;
+  return `hsl(${hue} ${saturation}% ${lightness}%)`;
+}
+
+function getTeamAccentColor(team: Team) {
+  const key = (team.tla ?? team.shortName ?? team.name ?? '').toUpperCase().trim();
+  const preset: Record<string, string> = {
+    RMA: '#f2c94c',
+    FCB: '#a50044',
+    ATM: '#d71920',
+    LIV: '#c8102e',
+    MCI: '#6cabdd',
+    ARS: '#ef0107',
+    MUN: '#da291c',
+    CHE: '#034694',
+    TOT: '#132257',
+    PSG: '#004170',
+    JUV: '#111111',
+    INT: '#00529f',
+    MIL: '#c0002b',
+    BAY: '#dc052d',
+    DOR: '#fdeb00',
+    AJAX: '#d2122e'
+  };
+  if (key && preset[key]) {
+    return preset[key];
+  }
+  return colorFromText(key || team.name || 'team');
+}
+
+function profileToForm(profile: UserProfile | null): ProfileForm {
+  return {
+    firstName: profile?.first_name ?? '',
+    lastName: profile?.last_name ?? '',
+    displayName: profile?.display_name ?? '',
+    country: profile?.country ?? '',
+    favoriteTeam: profile?.favorite_team ?? '',
+    bio: profile?.bio ?? ''
+  };
+}
+
+function toLocalDateTimeInput(value: string | null | undefined) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+function fromLocalDateTimeInput(value: string) {
+  if (!value.trim()) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
+
+function profileToResponsibleForm(profile: UserProfile | null): ResponsiblePlayForm {
+  return {
+    remindersEnabled: profile?.reminders_enabled ?? true,
+    reminderMinutesBefore: String(profile?.reminder_minutes_before ?? 30),
+    weeklySummaryEnabled: profile?.weekly_summary_enabled ?? true,
+    takeBreakUntil: toLocalDateTimeInput(profile?.take_break_until)
+  };
+}
+
+function splitDisplayName(name: string | null | undefined) {
+  const full = (name ?? '').trim();
+  if (!full) {
+    return { firstName: '', lastName: '' };
+  }
+  const [firstName, ...rest] = full.split(/\s+/);
+  return { firstName, lastName: rest.join(' ') };
+}
+
+function ImportantMatchCard({ match, onOpen }: { match: Match; onOpen: (match: Match) => Promise<void> }) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const kickoffMs = Date.parse(match.utcDate);
+  const isUpcoming = ['SCHEDULED', 'TIMED'].includes(match.status) && !Number.isNaN(kickoffMs) && kickoffMs > nowMs;
+  const countdown = isUpcoming ? formatCountdown(kickoffMs - nowMs) : match.status;
+
+  return (
+    <button
+      type="button"
+      className="important-feature-card"
+      onClick={() => void onOpen(match)}
+      style={
+        {
+          '--left-accent': getTeamAccentColor(match.homeTeam),
+          '--right-accent': getTeamAccentColor(match.awayTeam)
+        } as CSSProperties
+      }
+    >
+      <span className="important-feature-head">
+        <span className="important-feature-meta">
+          <strong>{match.competition?.name ?? 'Competition'}</strong>
+          <span className="muted">{formatMatchDateTime(match.utcDate)}</span>
+        </span>
+        <strong className={`important-feature-countdown ${isUpcoming ? '' : 'important-live'}`}>{countdown}</strong>
+      </span>
+      <span className="important-feature-teams">
+        <span className="team-name-wrap">
+          {match.homeTeam.crest ? <img className="team-crest team-crest-large" src={match.homeTeam.crest} alt="" loading="lazy" /> : null}
+          <span className="team-name important-team-name">{match.homeTeam.name}</span>
+        </span>
+        <span className="important-vs">VS</span>
+        <span className="team-name-wrap">
+          {match.awayTeam.crest ? <img className="team-crest team-crest-large" src={match.awayTeam.crest} alt="" loading="lazy" /> : null}
+          <span className="team-name important-team-name">{match.awayTeam.name}</span>
+        </span>
+      </span>
+    </button>
+  );
+}
+
 function App() {
   const today = useMemo(() => getTodayLocalDateInputValue(), []);
   const [page, setPage] = useState<AppPage>(() => getPageFromHash(window.location.hash));
@@ -170,6 +338,32 @@ function App() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
+  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
+  const [signupProfile, setSignupProfile] = useState<ProfileForm>({
+    firstName: '',
+    lastName: '',
+    displayName: '',
+    country: '',
+    favoriteTeam: '',
+    bio: ''
+  });
+  const [profileForm, setProfileForm] = useState<ProfileForm>({
+    firstName: '',
+    lastName: '',
+    displayName: '',
+    country: '',
+    favoriteTeam: '',
+    bio: ''
+  });
+  const [profileRecord, setProfileRecord] = useState<UserProfile | null>(null);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [responsibleForm, setResponsibleForm] = useState<ResponsiblePlayForm>({
+    remindersEnabled: true,
+    reminderMinutesBefore: '30',
+    weeklySummaryEnabled: true,
+    takeBreakUntil: ''
+  });
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
 
@@ -203,9 +397,17 @@ function App() {
   const [groupMatches, setGroupMatches] = useState<Match[]>([]);
   const [myPredictions, setMyPredictions] = useState<Record<number, MatchPrediction>>({});
   const [groupPredictionsByMatch, setGroupPredictionsByMatch] = useState<Record<number, MatchPrediction[]>>({});
-  const [allGroupPredictions, setAllGroupPredictions] = useState<MatchPrediction[]>([]);
-  const [matchResultsById, setMatchResultsById] = useState<Record<number, Match>>({});
   const [predictionDrafts, setPredictionDrafts] = useState<Record<number, PredictionDraft>>({});
+  const [leaderboardScope, setLeaderboardScope] = useState<'total' | 'weekly'>('total');
+  const [groupLeaderboardData, setGroupLeaderboardData] = useState<GroupLeaderboard | null>(null);
+  const [groupLeaderboardLoading, setGroupLeaderboardLoading] = useState(false);
+  const [groupBonusMatches, setGroupBonusMatches] = useState<GroupBonusMatch[]>([]);
+  const [groupSettingsBusy, setGroupSettingsBusy] = useState(false);
+  const [lockMinutesInput, setLockMinutesInput] = useState('0');
+  const [bonusEnabledInput, setBonusEnabledInput] = useState(false);
+  const [bonusMatchIdInput, setBonusMatchIdInput] = useState('');
+  const [bonusMultiplierInput, setBonusMultiplierInput] = useState('1.5');
+  const [bonusLabelInput, setBonusLabelInput] = useState('Derby');
 
   const [newGroupName, setNewGroupName] = useState('');
   const [newGroupCompetitionId, setNewGroupCompetitionId] = useState('');
@@ -218,7 +420,8 @@ function App() {
     () => groups.find((group) => group.id === selectedGroupId) ?? null,
     [groups, selectedGroupId]
   );
-  const groupMatchMap = useMemo(() => new Map(groupMatches.map((match) => [match.id, match])), [groupMatches]);
+  const yesterdayDate = useMemo(() => shiftLocalDate(today, -1), [today]);
+  const tomorrowDate = useMemo(() => shiftLocalDate(today, 1), [today]);
 
   const publicCountries = useMemo(() => {
     return Array.from(
@@ -252,33 +455,27 @@ function App() {
     });
   }, [filteredPublicMatches]);
 
+  const importantMatch = useMemo(() => {
+    const liveStatuses = new Set(['LIVE', 'IN_PLAY', 'PAUSED']);
+    const scheduleStatuses = new Set(['SCHEDULED', 'TIMED']);
+
+    const live = filteredPublicMatches.filter((match) => liveStatuses.has(match.status));
+    const upcoming = filteredPublicMatches
+      .filter((match) => scheduleStatuses.has(match.status))
+      .map((match) => ({ match, kickoffMs: Date.parse(match.utcDate) }))
+      .filter((row) => !Number.isNaN(row.kickoffMs))
+      .sort((a, b) => a.kickoffMs - b.kickoffMs)
+      .map((row) => row.match);
+
+    return [...live, ...upcoming][0] ?? null;
+  }, [filteredPublicMatches]);
+
   const standingsYears = useMemo(() => {
     const currentSeasonStart = getCurrentSeasonStartYear();
     return Array.from({ length: 12 }, (_, index) => String(currentSeasonStart - index));
   }, []);
 
-  const groupLeaderboard = useMemo(() => {
-    const totals: Record<string, number> = {};
-    for (const member of groupMembers) {
-      totals[member.user_uid] = 0;
-    }
-
-    for (const prediction of allGroupPredictions) {
-      const match = matchResultsById[prediction.match_id] ?? groupMatchMap.get(prediction.match_id);
-      if (!match) continue;
-      const points = calculatePredictionPoints(match, prediction);
-      if (!points.ready) continue;
-      totals[prediction.user_uid] = (totals[prediction.user_uid] ?? 0) + points.total;
-    }
-
-    return groupMembers
-      .map((member) => ({
-        userUid: member.user_uid,
-        email: member.email,
-        points: totals[member.user_uid] ?? 0
-      }))
-      .sort((a, b) => b.points - a.points);
-  }, [allGroupPredictions, groupMembers, groupMatchMap, matchResultsById]);
+  const groupLeaderboard = groupLeaderboardData?.leaderboard ?? [];
 
   const completedDraftCount = useMemo(() => {
     let total = 0;
@@ -338,10 +535,21 @@ function App() {
     if (!user) {
       setGroups([]);
       setSelectedGroupId('');
+      setProfileRecord(null);
+      setProfileForm({
+        firstName: '',
+        lastName: '',
+        displayName: '',
+        country: '',
+        favoriteTeam: '',
+        bio: ''
+      });
+      setResponsibleForm(profileToResponsibleForm(null));
       return;
     }
 
     void bootstrapForUser(user);
+    void loadProfileForUser(user);
   }, [user]);
 
   useEffect(() => {
@@ -349,14 +557,25 @@ function App() {
       setGroupMatches([]);
       setMyPredictions({});
       setGroupPredictionsByMatch({});
-      setAllGroupPredictions([]);
-      setMatchResultsById({});
       setGroupMembers([]);
+      setGroupLeaderboardData(null);
+      setGroupBonusMatches([]);
       return;
     }
 
+    setLockMinutesInput(String(selectedGroup.prediction_lock_minutes ?? 0));
+    setBonusEnabledInput(Boolean(selectedGroup.bonus_enabled));
     void loadGroupData(user.uid, selectedGroup);
   }, [selectedGroup, user, today]);
+
+  useEffect(() => {
+    if (!selectedGroup) {
+      setGroupLeaderboardData(null);
+      return;
+    }
+
+    void loadGroupLeaderboardData(selectedGroup.id, leaderboardScope);
+  }, [leaderboardScope, selectedGroup?.id]);
 
   async function loadCompetitions() {
     try {
@@ -456,6 +675,76 @@ function App() {
       setTopScorersError(err instanceof Error ? err.message : 'Failed to load top scorers.');
     } finally {
       setTopScorersLoading(false);
+    }
+  }
+
+  async function loadProfileForUser(currentUser: User) {
+    try {
+      setProfileLoading(true);
+      const profile = await loadUserProfile(currentUser.uid);
+      setProfileRecord(profile);
+      if (profile) {
+        setProfileForm(profileToForm(profile));
+        setResponsibleForm(profileToResponsibleForm(profile));
+        return;
+      }
+
+      const inferred = splitDisplayName(currentUser.displayName);
+      setProfileForm({
+        firstName: inferred.firstName,
+        lastName: inferred.lastName,
+        displayName: currentUser.displayName ?? '',
+        country: '',
+        favoriteTeam: '',
+        bio: ''
+      });
+      setResponsibleForm(profileToResponsibleForm(null));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load profile.');
+    } finally {
+      setProfileLoading(false);
+    }
+  }
+
+  async function handleSaveProfile() {
+    if (!user) {
+      setError('You need to be logged in to save profile.');
+      return;
+    }
+
+    try {
+      setProfileSaving(true);
+      setError('');
+      const reminderMinutes = Number(responsibleForm.reminderMinutesBefore);
+      if (Number.isNaN(reminderMinutes) || reminderMinutes < 5 || reminderMinutes > 180) {
+        setError('Reminder minutes must be between 5 and 180.');
+        return;
+      }
+      await upsertUserProfile({
+        userUid: user.uid,
+        email: user.email ?? email,
+        firstName: profileForm.firstName,
+        lastName: profileForm.lastName,
+        displayName: profileForm.displayName,
+        country: profileForm.country,
+        favoriteTeam: profileForm.favoriteTeam,
+        bio: profileForm.bio,
+        remindersEnabled: responsibleForm.remindersEnabled,
+        reminderMinutesBefore: Math.floor(reminderMinutes),
+        weeklySummaryEnabled: responsibleForm.weeklySummaryEnabled,
+        takeBreakUntil: fromLocalDateTimeInput(responsibleForm.takeBreakUntil)
+      });
+      const refreshed = await loadUserProfile(user.uid);
+      setProfileRecord(refreshed);
+      if (refreshed) {
+        setProfileForm(profileToForm(refreshed));
+        setResponsibleForm(profileToResponsibleForm(refreshed));
+      }
+      setMessage('Profile saved.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save profile.');
+    } finally {
+      setProfileSaving(false);
     }
   }
 
@@ -559,30 +848,97 @@ function App() {
     setMatchDetailsError('');
   }
 
-  async function refreshTotalLeaderboardData(groupId: string) {
-    const allPredictions = await loadPredictionsForGroup({ groupId });
-    setAllGroupPredictions(allPredictions);
+  async function loadGroupLeaderboardData(groupId: string, scope: 'total' | 'weekly') {
+    try {
+      setGroupLeaderboardLoading(true);
+      const data = await loadGroupLeaderboard({
+        groupId,
+        scope,
+        referenceDate: `${today}T00:00:00.000Z`
+      });
+      setGroupLeaderboardData(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load leaderboard.');
+    } finally {
+      setGroupLeaderboardLoading(false);
+    }
+  }
 
-    const matchIds = Array.from(new Set(allPredictions.map((item) => item.match_id)));
-    if (matchIds.length === 0) {
-      setMatchResultsById({});
+  async function loadGroupBonusData(groupId: string) {
+    try {
+      const data = await loadGroupBonusMatches(groupId);
+      setGroupBonusMatches(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load bonus matches.');
+    }
+  }
+
+  async function handleSaveGroupSettings() {
+    if (!selectedGroup) return;
+    if (!isGroupOwner) {
+      setError('Only group owner can update fair-play settings.');
+      return;
+    }
+    const lock = Number(lockMinutesInput);
+    if (Number.isNaN(lock) || lock < 0 || lock > 180) {
+      setError('Prediction lock must be between 0 and 180 minutes.');
       return;
     }
 
-    const entries = await Promise.all(
-      matchIds.map(async (matchId) => {
-        const match = await loadMatchById(matchId);
-        return [matchId, match] as const;
-      })
-    );
-
-    const map: Record<number, Match> = {};
-    for (const [matchId, match] of entries) {
-      if (match) {
-        map[matchId] = match;
-      }
+    try {
+      setGroupSettingsBusy(true);
+      setError('');
+      const updated = await updateGroupSettings({
+        groupId: selectedGroup.id,
+        predictionLockMinutes: lock,
+        bonusEnabled: bonusEnabledInput
+      });
+      setGroups((prev) => prev.map((group) => (group.id === updated.id ? updated : group)));
+      setMessage('Group fair-play settings updated.');
+      await loadGroupLeaderboardData(selectedGroup.id, leaderboardScope);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save group settings.');
+    } finally {
+      setGroupSettingsBusy(false);
     }
-    setMatchResultsById(map);
+  }
+
+  async function handleAddBonusRule() {
+    if (!selectedGroup) return;
+    if (!isGroupOwner) {
+      setError('Only group owner can update bonus rules.');
+      return;
+    }
+    const matchId = Number(bonusMatchIdInput);
+    const multiplier = Number(bonusMultiplierInput);
+    if (!matchId || Number.isNaN(matchId)) {
+      setError('Select a valid match for bonus rule.');
+      return;
+    }
+    if (Number.isNaN(multiplier) || multiplier < 1 || multiplier > 5) {
+      setError('Bonus multiplier must be between 1.0 and 5.0.');
+      return;
+    }
+
+    try {
+      setGroupSettingsBusy(true);
+      setError('');
+      const data = await upsertGroupBonusMatches(selectedGroup.id, [
+        {
+          matchId,
+          multiplier,
+          label: bonusLabelInput.trim() || 'custom',
+          active: true
+        }
+      ]);
+      setGroupBonusMatches(data);
+      setMessage('Bonus rule saved.');
+      await loadGroupLeaderboardData(selectedGroup.id, leaderboardScope);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save bonus rule.');
+    } finally {
+      setGroupSettingsBusy(false);
+    }
   }
 
   async function loadGroupData(userUid: string, group: AppGroup) {
@@ -623,7 +979,7 @@ function App() {
         };
       }
       setPredictionDrafts(nextDrafts);
-      await refreshTotalLeaderboardData(group.id);
+      await Promise.all([loadGroupLeaderboardData(group.id, leaderboardScope), loadGroupBonusData(group.id)]);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load group data.');
     } finally {
@@ -636,7 +992,17 @@ function App() {
       setAuthLoading(true);
       setError('');
       setMessage('');
-      await createUserWithEmailAndPassword(firebaseAuth, email.trim(), password);
+      const credential = await createUserWithEmailAndPassword(firebaseAuth, email.trim(), password);
+      await upsertUserProfile({
+        userUid: credential.user.uid,
+        email: credential.user.email ?? email.trim(),
+        firstName: signupProfile.firstName,
+        lastName: signupProfile.lastName,
+        displayName: signupProfile.displayName,
+        country: signupProfile.country,
+        favoriteTeam: signupProfile.favoriteTeam,
+        bio: signupProfile.bio
+      });
       setMessage('Account created. You are signed in.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Registration failed.');
@@ -653,6 +1019,35 @@ function App() {
       await signInWithEmailAndPassword(firebaseAuth, email.trim(), password);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed.');
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  async function handleGoogleAuth() {
+    try {
+      setAuthLoading(true);
+      setError('');
+      setMessage('');
+      const provider = new GoogleAuthProvider();
+      const credential = await signInWithPopup(firebaseAuth, provider);
+      const existing = await loadUserProfile(credential.user.uid);
+      if (!existing) {
+        const inferred = splitDisplayName(credential.user.displayName);
+        await upsertUserProfile({
+          userUid: credential.user.uid,
+          email: credential.user.email ?? '',
+          firstName: inferred.firstName,
+          lastName: inferred.lastName,
+          displayName: credential.user.displayName ?? '',
+          country: '',
+          favoriteTeam: '',
+          bio: ''
+        });
+      }
+      setMessage('Signed in with Google.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Google sign-in failed.');
     } finally {
       setAuthLoading(false);
     }
@@ -716,6 +1111,7 @@ function App() {
     try {
       setBusy(true);
       setError('');
+      const idToken = await user.getIdToken();
       await inviteMember({
         groupId: selectedGroup.id,
         invitedByUid: user.uid,
@@ -724,11 +1120,15 @@ function App() {
 
       const emailResponse = await fetch('/internal/invite-email', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`
+        },
         body: JSON.stringify({
           toEmail: inviteEmail.trim(),
           groupName: selectedGroup.name,
-          inviterEmail: user.email ?? ''
+          inviterEmail: user.email ?? '',
+          groupId: selectedGroup.id
         })
       });
       if (!emailResponse.ok) {
@@ -770,8 +1170,14 @@ function App() {
       ftHome: number;
       ftAway: number;
     }> = [];
+    let lockedMatches = 0;
 
     for (const match of groupMatches) {
+      if (!isMatchOpenForPrediction(match, selectedGroup.prediction_lock_minutes)) {
+        lockedMatches += 1;
+        continue;
+      }
+
       const draft = predictionDrafts[match.id];
       if (!draft) continue;
 
@@ -799,7 +1205,11 @@ function App() {
     }
 
     if (payloads.length === 0) {
-      setError('No completed predictions to save. Fill HT and FT first.');
+      setError(
+        lockedMatches > 0
+          ? `No predictions saved. ${lockedMatches} match(es) are locked (kickoff already started).`
+          : 'No completed predictions to save. Fill HT and FT first.'
+      );
       return;
     }
 
@@ -807,7 +1217,17 @@ function App() {
       setSavingAll(true);
       setError('');
 
-      await Promise.all(payloads.map((payload) => savePrediction(payload)));
+      const results = await Promise.allSettled(payloads.map((payload) => savePrediction(payload)));
+      const successCount = results.filter((result) => result.status === 'fulfilled').length;
+      const failCount = results.length - successCount;
+      if (successCount === 0) {
+        const firstError = results.find((result) => result.status === 'rejected');
+        const message =
+          firstError && firstError.status === 'rejected' && firstError.reason instanceof Error
+            ? firstError.reason.message
+            : 'Failed to save predictions.';
+        throw new Error(message);
+      }
 
       const latest = await loadPredictionsForGroup({
         groupId: selectedGroup.id,
@@ -823,8 +1243,12 @@ function App() {
         byMatch[row.match_id].push(row);
       }
       setGroupPredictionsByMatch(byMatch);
-      await refreshTotalLeaderboardData(selectedGroup.id);
-      setMessage(`Saved ${payloads.length} prediction(s).`);
+      await loadGroupLeaderboardData(selectedGroup.id, leaderboardScope);
+      setMessage(
+        lockedMatches > 0 || failCount > 0
+          ? `Saved ${successCount} prediction(s). Skipped/failed: ${lockedMatches + failCount}.`
+          : `Saved ${successCount} prediction(s).`
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save all predictions.');
     } finally {
@@ -833,7 +1257,7 @@ function App() {
   }
 
   function goToPage(nextPage: AppPage) {
-    const nextHash = nextPage === 'game' ? '#/game' : '#/';
+    const nextHash = nextPage === 'game' ? '#/game' : nextPage === 'profile' ? '#/profile' : '#/';
     if (window.location.hash !== nextHash) {
       window.location.hash = nextHash;
     }
@@ -850,7 +1274,9 @@ function App() {
     );
   }
 
-  const headerContextLabel = page === 'home' ? 'Home Matches' : 'Game';
+  const headerContextLabel =
+    page === 'home' ? 'Home Matches' : page === 'game' ? 'Game' : user ? 'Your Profile' : 'Profile';
+  const isGroupOwner = Boolean(user && selectedGroup && selectedGroup.owner_uid === user.uid);
 
   return (
     <div className="app">
@@ -881,6 +1307,13 @@ function App() {
             >
               Game
             </button>
+            <button
+              type="button"
+              className={`chip ${page === 'profile' ? 'chip-active' : ''}`}
+              onClick={() => goToPage('profile')}
+            >
+              Profile
+            </button>
           </nav>
 
           <div className="topbar-action">
@@ -901,8 +1334,33 @@ function App() {
               <section className="filter-panel">
                 <h2>Home Matches</h2>
                 <div className="date-box">
-                  <span className="box-label">Date</span>
-                  <input type="date" value={publicDate} onChange={(e) => setPublicDate(e.target.value)} />
+                  <div className="date-box-head">
+                    <span className="box-label">Date</span>
+                    <input type="date" value={publicDate} onChange={(e) => setPublicDate(e.target.value)} />
+                  </div>
+                  <div className="date-shortcuts">
+                    <button
+                      type="button"
+                      className={`chip ${publicDate === yesterdayDate ? 'chip-active' : ''}`}
+                      onClick={() => setPublicDate(yesterdayDate)}
+                    >
+                      Yesterday
+                    </button>
+                    <button
+                      type="button"
+                      className={`chip ${publicDate === today ? 'chip-active' : ''}`}
+                      onClick={() => setPublicDate(today)}
+                    >
+                      Today
+                    </button>
+                    <button
+                      type="button"
+                      className={`chip ${publicDate === tomorrowDate ? 'chip-active' : ''}`}
+                      onClick={() => setPublicDate(tomorrowDate)}
+                    >
+                      Tomorrow
+                    </button>
+                  </div>
                 </div>
                 <div className="quick-status">
                   {statuses.map((status) => (
@@ -943,6 +1401,13 @@ function App() {
                     Refresh
                   </button>
                 </div>
+              </section>
+
+              <section className="filter-panel important-panel">
+                {!importantMatch ? <p className="muted">No live/upcoming important match.</p> : null}
+                {importantMatch ? (
+                  <ImportantMatchCard match={importantMatch} onOpen={openMatchDetails} />
+                ) : null}
               </section>
 
               <section className="scoreboard">
@@ -993,11 +1458,17 @@ function App() {
                             }}
                           >
                             <div className="team-line">
-                              <span className="team-name">{match.homeTeam.name}</span>
+                              <span className="team-name-wrap">
+                                {match.homeTeam.crest ? <img className="team-crest" src={match.homeTeam.crest} alt="" loading="lazy" /> : null}
+                                <span className="team-name">{match.homeTeam.name}</span>
+                              </span>
                               <strong className="team-score">{match.score?.fullTime?.home ?? '-'}</strong>
                             </div>
                             <div className="team-line">
-                              <span className="team-name">{match.awayTeam.name}</span>
+                              <span className="team-name-wrap">
+                                {match.awayTeam.crest ? <img className="team-crest" src={match.awayTeam.crest} alt="" loading="lazy" /> : null}
+                                <span className="team-name">{match.awayTeam.name}</span>
+                              </span>
                               <strong className="team-score">{match.score?.fullTime?.away ?? '-'}</strong>
                             </div>
                           </div>
@@ -1139,22 +1610,122 @@ function App() {
         ) : null}
 
         {page === 'game' && !user ? (
-          <section className="filter-panel auth-box">
-            <h2>Login To Play Predictions</h2>
-            <label>
-              Email
-              <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" />
-            </label>
-            <label>
-              Password
-              <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" />
-            </label>
-            <div className="auth-actions">
-              <button type="button" className="refresh" onClick={() => void handleLogin()} disabled={authLoading}>
-                Login
-              </button>
-              <button type="button" className="details-btn" onClick={() => void handleRegister()} disabled={authLoading}>
-                Register
+          <section className="auth-shell">
+            <article className="auth-hero">
+              <p className="box-label">PredictLeague</p>
+              <h2>Join The Game Room</h2>
+              <p className="muted">Create private groups, invite friends, and submit your HT/FT predictions every day.</p>
+            </article>
+            <div className="filter-panel auth-box auth-card">
+              <div className="auth-switch">
+                <button
+                  type="button"
+                  className={`chip ${authMode === 'login' ? 'chip-active' : ''}`}
+                  onClick={() => setAuthMode('login')}
+                >
+                  Login
+                </button>
+                <button
+                  type="button"
+                  className={`chip ${authMode === 'signup' ? 'chip-active' : ''}`}
+                  onClick={() => setAuthMode('signup')}
+                >
+                  Sign up
+                </button>
+              </div>
+
+              <h3>{authMode === 'login' ? 'Welcome back' : 'Create your account'}</h3>
+              <label>
+                Email
+                <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" autoComplete="email" />
+              </label>
+              <label>
+                Password
+                <input
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  type="password"
+                  autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
+                />
+              </label>
+              {authMode === 'signup' ? (
+                <div className="selectors auth-signup-grid">
+                  <label>
+                    First Name
+                    <input
+                      value={signupProfile.firstName}
+                      onChange={(e) => setSignupProfile((prev) => ({ ...prev, firstName: e.target.value }))}
+                      type="text"
+                      autoComplete="given-name"
+                    />
+                  </label>
+                  <label>
+                    Last Name
+                    <input
+                      value={signupProfile.lastName}
+                      onChange={(e) => setSignupProfile((prev) => ({ ...prev, lastName: e.target.value }))}
+                      type="text"
+                      autoComplete="family-name"
+                    />
+                  </label>
+                  <label>
+                    Display Name
+                    <input
+                      value={signupProfile.displayName}
+                      onChange={(e) => setSignupProfile((prev) => ({ ...prev, displayName: e.target.value }))}
+                      type="text"
+                    />
+                  </label>
+                  <label>
+                    Country
+                    <input
+                      value={signupProfile.country}
+                      onChange={(e) => setSignupProfile((prev) => ({ ...prev, country: e.target.value }))}
+                      type="text"
+                      autoComplete="country-name"
+                    />
+                  </label>
+                  <label>
+                    Favorite Team
+                    <input
+                      value={signupProfile.favoriteTeam}
+                      onChange={(e) => setSignupProfile((prev) => ({ ...prev, favoriteTeam: e.target.value }))}
+                      type="text"
+                    />
+                  </label>
+                  <label className="auth-bio">
+                    Bio
+                    <textarea
+                      value={signupProfile.bio}
+                      onChange={(e) => setSignupProfile((prev) => ({ ...prev, bio: e.target.value }))}
+                      rows={3}
+                    />
+                  </label>
+                </div>
+              ) : null}
+
+              <div className="auth-actions">
+                <button
+                  type="button"
+                  className="refresh"
+                  onClick={() => void (authMode === 'login' ? handleLogin() : handleRegister())}
+                  disabled={authLoading}
+                >
+                  {authLoading ? 'Please wait...' : authMode === 'login' ? 'Login' : 'Create account'}
+                </button>
+                <button
+                  type="button"
+                  className="details-btn"
+                  onClick={() => setAuthMode((prev) => (prev === 'login' ? 'signup' : 'login'))}
+                  disabled={authLoading}
+                >
+                  {authMode === 'login' ? 'Need account?' : 'Have account?'}
+                </button>
+              </div>
+
+              <div className="auth-divider">or</div>
+              <button type="button" className="details-btn auth-google" onClick={() => void handleGoogleAuth()} disabled={authLoading}>
+                Continue with Google
               </button>
             </div>
           </section>
@@ -1229,19 +1800,133 @@ function App() {
 
               {selectedGroup ? (
                 <section className="filter-panel">
-                  <h2>Leaderboard (Total)</h2>
+                  <h2>Fair Play Rules</h2>
+                  <p className="muted">
+                    Lock minutes before kickoff: <strong>{selectedGroup.prediction_lock_minutes}</strong> | Bonus rules:{' '}
+                    <strong>{selectedGroup.bonus_enabled ? 'On' : 'Off'}</strong>
+                  </p>
+                  {isGroupOwner ? (
+                    <>
+                      <div className="selectors">
+                        <label>
+                          Lock Minutes
+                          <input
+                            type="number"
+                            min={0}
+                            max={180}
+                            value={lockMinutesInput}
+                            onChange={(e) => setLockMinutesInput(e.target.value)}
+                          />
+                        </label>
+                        <label>
+                          Bonus Enabled
+                          <select
+                            value={bonusEnabledInput ? 'on' : 'off'}
+                            onChange={(e) => setBonusEnabledInput(e.target.value === 'on')}
+                          >
+                            <option value="off">Off</option>
+                            <option value="on">On</option>
+                          </select>
+                        </label>
+                        <button type="button" className="refresh" disabled={groupSettingsBusy} onClick={() => void handleSaveGroupSettings()}>
+                          Save Rules
+                        </button>
+                      </div>
+
+                      <div className="selectors">
+                        <label>
+                          Bonus Match
+                          <select value={bonusMatchIdInput} onChange={(e) => setBonusMatchIdInput(e.target.value)}>
+                            <option value="">Select today match</option>
+                            {groupMatches.map((match) => (
+                              <option key={match.id} value={match.id}>
+                                {match.homeTeam.name} vs {match.awayTeam.name}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Multiplier
+                          <input
+                            type="number"
+                            step="0.1"
+                            min={1}
+                            max={5}
+                            value={bonusMultiplierInput}
+                            onChange={(e) => setBonusMultiplierInput(e.target.value)}
+                          />
+                        </label>
+                        <label>
+                          Label
+                          <input value={bonusLabelInput} onChange={(e) => setBonusLabelInput(e.target.value)} />
+                        </label>
+                        <button type="button" className="refresh" disabled={groupSettingsBusy} onClick={() => void handleAddBonusRule()}>
+                          Add Bonus
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <p className="muted">Only group owner can update fair-play settings.</p>
+                  )}
+
+                  <div className="invite-list">
+                    {groupBonusMatches.length === 0 ? <p className="muted">No bonus matches yet.</p> : null}
+                    {groupBonusMatches.map((bonus) => (
+                      <p key={bonus.id}>
+                        Match #{bonus.match_id} - {bonus.label} x{bonus.multiplier}
+                      </p>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
+
+              {selectedGroup ? (
+                <section className="filter-panel">
+                  <h2>Leaderboard ({leaderboardScope === 'weekly' ? 'Weekly' : 'Total'})</h2>
+                  <div className="quick-status">
+                    <button
+                      type="button"
+                      className={`chip ${leaderboardScope === 'total' ? 'chip-active' : ''}`}
+                      onClick={() => setLeaderboardScope('total')}
+                    >
+                      Total
+                    </button>
+                    <button
+                      type="button"
+                      className={`chip ${leaderboardScope === 'weekly' ? 'chip-active' : ''}`}
+                      onClick={() => setLeaderboardScope('weekly')}
+                    >
+                      Weekly
+                    </button>
+                  </div>
+                  {groupLeaderboardLoading ? <p className="muted">Loading leaderboard...</p> : null}
                   {groupLeaderboard.length === 0 ? <p className="muted">No members in this group.</p> : null}
                   <div className="leaderboard-list">
-                    {groupLeaderboard.map((row, index) => (
-                      <article className="leaderboard-card" key={row.userUid}>
-                        <div className="leaderboard-rank">#{index + 1}</div>
+                    {groupLeaderboard.map((row) => (
+                      <article className="leaderboard-card" key={row.user_uid}>
+                        <div className="leaderboard-rank">#{row.rank}</div>
                         <div className="leaderboard-user">
                           <strong>{row.email}</strong>
+                          <p className="muted">
+                            FT:{row.exact_ft_count} | HT:{row.exact_ht_count} | W:{row.winner_count} | Streak:{row.streak_days}
+                          </p>
                         </div>
                         <div className="leaderboard-points">{row.points} pts</div>
                       </article>
                     ))}
                   </div>
+                  {groupLeaderboardData?.rounds?.length ? (
+                    <div className="invite-list">
+                      <p>
+                        <strong>Round History</strong>
+                      </p>
+                      {groupLeaderboardData.rounds.map((round) => (
+                        <p key={round.round}>
+                          Round {round.round}: {round.total_points} pts
+                        </p>
+                      ))}
+                    </div>
+                  ) : null}
                 </section>
               ) : null}
             </div>
@@ -1281,8 +1966,8 @@ function App() {
                     const draft = predictionDrafts[match.id] ?? { htHome: '', htAway: '', ftHome: '', ftAway: '' };
                     const saved = myPredictions[match.id];
                     const matchPredictions = groupPredictionsByMatch[match.id] ?? [];
-                    const submittedUserCount = new Set(matchPredictions.map((item) => item.user_uid)).size;
-                    const shouldReveal = groupMembers.length > 0 && submittedUserCount >= groupMembers.length;
+                    const isOpenForPrediction = isMatchOpenForPrediction(match, selectedGroup.prediction_lock_minutes);
+                    const shouldReveal = isMatchStarted(match);
                     const memberEmailByUid = Object.fromEntries(groupMembers.map((member) => [member.user_uid, member.email]));
                     const matchResult = getMatchResult(match);
                     const matchLabel = `${match.homeTeam.name} vs ${match.awayTeam.name}`;
@@ -1297,11 +1982,17 @@ function App() {
 
                           <div className="teams-col">
                             <div className="team-line">
-                              <span className="team-name">{match.homeTeam.name}</span>
+                              <span className="team-name-wrap">
+                                {match.homeTeam.crest ? <img className="team-crest" src={match.homeTeam.crest} alt="" loading="lazy" /> : null}
+                                <span className="team-name">{match.homeTeam.name}</span>
+                              </span>
                               <strong className="team-score">{match.score?.fullTime?.home ?? '-'}</strong>
                             </div>
                             <div className="team-line">
-                              <span className="team-name">{match.awayTeam.name}</span>
+                              <span className="team-name-wrap">
+                                {match.awayTeam.crest ? <img className="team-crest" src={match.awayTeam.crest} alt="" loading="lazy" /> : null}
+                                <span className="team-name">{match.awayTeam.name}</span>
+                              </span>
                               <strong className="team-score">{match.score?.fullTime?.away ?? '-'}</strong>
                             </div>
                           </div>
@@ -1314,6 +2005,7 @@ function App() {
                                   type="number"
                                   min={0}
                                   value={draft.htHome}
+                                  disabled={!isOpenForPrediction}
                                   onChange={(e) =>
                                     setPredictionDrafts((prev) => ({
                                       ...prev,
@@ -1326,6 +2018,7 @@ function App() {
                                   type="number"
                                   min={0}
                                   value={draft.htAway}
+                                  disabled={!isOpenForPrediction}
                                   onChange={(e) =>
                                     setPredictionDrafts((prev) => ({
                                       ...prev,
@@ -1343,6 +2036,7 @@ function App() {
                                   type="number"
                                   min={0}
                                   value={draft.ftHome}
+                                  disabled={!isOpenForPrediction}
                                   onChange={(e) =>
                                     setPredictionDrafts((prev) => ({
                                       ...prev,
@@ -1355,6 +2049,7 @@ function App() {
                                   type="number"
                                   min={0}
                                   value={draft.ftAway}
+                                  disabled={!isOpenForPrediction}
                                   onChange={(e) =>
                                     setPredictionDrafts((prev) => ({
                                       ...prev,
@@ -1371,10 +2066,9 @@ function App() {
                             Saved: HT {saved.ht_home}-{saved.ht_away} | FT {saved.ft_home}-{saved.ft_away}
                           </p>
                         ) : null}
+                        {!isOpenForPrediction ? <p className="saved-line">Predictions locked for this match.</p> : null}
                         {saved && !shouldReveal ? (
-                          <p className="saved-line">
-                            Waiting for others: {submittedUserCount}/{groupMembers.length} submitted for this match.
-                          </p>
+                          <p className="saved-line">Predictions are private until kickoff starts.</p>
                         ) : null}
                         {matchResult ? (
                           <p className="saved-line">
@@ -1415,6 +2109,145 @@ function App() {
                 </section>
               ) : null}
             </div>
+          </section>
+        ) : null}
+
+        {page === 'profile' ? (
+          <section className="profile-shell">
+            {!user ? (
+              <article className="league-card empty">
+                Login first to view your profile.
+                <div className="auth-actions">
+                  <button type="button" className="refresh" onClick={() => goToPage('game')}>
+                    Go To Login
+                  </button>
+                </div>
+              </article>
+            ) : (
+              <section className="filter-panel profile-card">
+                <h2>Your Profile</h2>
+                {profileLoading ? <p className="muted">Loading profile...</p> : null}
+                <div className="selectors profile-grid">
+                  <label>
+                    Email
+                    <input value={user.email ?? ''} type="email" disabled />
+                  </label>
+                  <label>
+                    Display Name
+                    <input
+                      value={profileForm.displayName}
+                      onChange={(e) => setProfileForm((prev) => ({ ...prev, displayName: e.target.value }))}
+                      type="text"
+                    />
+                  </label>
+                  <label>
+                    First Name
+                    <input
+                      value={profileForm.firstName}
+                      onChange={(e) => setProfileForm((prev) => ({ ...prev, firstName: e.target.value }))}
+                      type="text"
+                      autoComplete="given-name"
+                    />
+                  </label>
+                  <label>
+                    Last Name
+                    <input
+                      value={profileForm.lastName}
+                      onChange={(e) => setProfileForm((prev) => ({ ...prev, lastName: e.target.value }))}
+                      type="text"
+                      autoComplete="family-name"
+                    />
+                  </label>
+                  <label>
+                    Country
+                    <input
+                      value={profileForm.country}
+                      onChange={(e) => setProfileForm((prev) => ({ ...prev, country: e.target.value }))}
+                      type="text"
+                      autoComplete="country-name"
+                    />
+                  </label>
+                  <label>
+                    Favorite Team
+                    <input
+                      value={profileForm.favoriteTeam}
+                      onChange={(e) => setProfileForm((prev) => ({ ...prev, favoriteTeam: e.target.value }))}
+                      type="text"
+                    />
+                  </label>
+                  <label className="profile-bio">
+                    Bio
+                    <textarea
+                      value={profileForm.bio}
+                      onChange={(e) => setProfileForm((prev) => ({ ...prev, bio: e.target.value }))}
+                      rows={5}
+                    />
+                  </label>
+                  <label>
+                    Match Reminders
+                    <select
+                      value={responsibleForm.remindersEnabled ? 'on' : 'off'}
+                      onChange={(e) =>
+                        setResponsibleForm((prev) => ({ ...prev, remindersEnabled: e.target.value === 'on' }))
+                      }
+                    >
+                      <option value="on">On</option>
+                      <option value="off">Off</option>
+                    </select>
+                  </label>
+                  <label>
+                    Reminder Minutes Before Kickoff
+                    <input
+                      type="number"
+                      min={5}
+                      max={180}
+                      value={responsibleForm.reminderMinutesBefore}
+                      onChange={(e) =>
+                        setResponsibleForm((prev) => ({ ...prev, reminderMinutesBefore: e.target.value }))
+                      }
+                    />
+                  </label>
+                  <label>
+                    Weekly Summary
+                    <select
+                      value={responsibleForm.weeklySummaryEnabled ? 'on' : 'off'}
+                      onChange={(e) =>
+                        setResponsibleForm((prev) => ({ ...prev, weeklySummaryEnabled: e.target.value === 'on' }))
+                      }
+                    >
+                      <option value="on">On</option>
+                      <option value="off">Off</option>
+                    </select>
+                  </label>
+                  <label>
+                    Take A Break Until
+                    <input
+                      type="datetime-local"
+                      value={responsibleForm.takeBreakUntil}
+                      onChange={(e) =>
+                        setResponsibleForm((prev) => ({ ...prev, takeBreakUntil: e.target.value }))
+                      }
+                    />
+                  </label>
+                </div>
+                <div className="auth-actions">
+                  <button type="button" className="refresh" disabled={profileSaving} onClick={() => void handleSaveProfile()}>
+                    {profileSaving ? 'Saving...' : 'Save Profile'}
+                  </button>
+                  <button
+                    type="button"
+                    className="details-btn"
+                    onClick={() => {
+                      setProfileForm(profileToForm(profileRecord));
+                      setResponsibleForm(profileToResponsibleForm(profileRecord));
+                    }}
+                    disabled={profileSaving}
+                  >
+                    Reset
+                  </button>
+                </div>
+              </section>
+            )}
           </section>
         ) : null}
 
@@ -1470,7 +2303,12 @@ function App() {
                           return (
                             <>
                               <p>
-                                <strong>{activeMatchDetails.homeTeam.name}</strong>
+                                <span className="team-name-wrap">
+                                  {activeMatchDetails.homeTeam.crest ? (
+                                    <img className="team-crest" src={activeMatchDetails.homeTeam.crest} alt="" loading="lazy" />
+                                  ) : null}
+                                  <strong>{activeMatchDetails.homeTeam.name}</strong>
+                                </span>
                               </p>
                               <p className="muted">Coach: {homeDetails?.coach?.name ?? activeMatchDetails.homeTeam.coach?.name ?? 'N/A'}</p>
                               {homePlayers.length === 0 ? <p className="muted">No squad data available.</p> : null}
@@ -1493,7 +2331,12 @@ function App() {
                           return (
                             <>
                               <p>
-                                <strong>{activeMatchDetails.awayTeam.name}</strong>
+                                <span className="team-name-wrap">
+                                  {activeMatchDetails.awayTeam.crest ? (
+                                    <img className="team-crest" src={activeMatchDetails.awayTeam.crest} alt="" loading="lazy" />
+                                  ) : null}
+                                  <strong>{activeMatchDetails.awayTeam.name}</strong>
+                                </span>
                               </p>
                               <p className="muted">Coach: {awayDetails?.coach?.name ?? activeMatchDetails.awayTeam.coach?.name ?? 'N/A'}</p>
                               {awayPlayers.length === 0 ? <p className="muted">No squad data available.</p> : null}
@@ -1536,6 +2379,11 @@ function App() {
         {message ? <p className="muted">{message}</p> : null}
         {busy ? <p className="muted">Working...</p> : null}
       </main>
+      <footer className="app-footer">
+        <div className="app-footer-inner">
+          <p>Copyright © {new Date().getFullYear()} PredictLeague. All rights reserved.</p>
+        </div>
+      </footer>
     </div>
   );
 }
@@ -1666,6 +2514,34 @@ function getMatchResult(match: Match): MatchScoreResult | null {
     ftAway,
     winner: match.score?.winner ?? getWinner(ftHome, ftAway)
   };
+}
+
+function isMatchOpenForPrediction(match: Match, lockMinutes = 0, now = new Date()) {
+  if (!['SCHEDULED', 'TIMED'].includes(match.status)) {
+    return false;
+  }
+
+  const kickoffMs = Date.parse(match.utcDate);
+  if (Number.isNaN(kickoffMs)) {
+    return false;
+  }
+
+  const normalizedLockMinutes = Number.isFinite(lockMinutes) ? Math.max(0, lockMinutes) : 0;
+  const lockAt = kickoffMs - normalizedLockMinutes * 60_000;
+  return lockAt > now.getTime();
+}
+
+function isMatchStarted(match: Match, now = new Date()) {
+  if (!['SCHEDULED', 'TIMED'].includes(match.status)) {
+    return true;
+  }
+
+  const kickoffMs = Date.parse(match.utcDate);
+  if (Number.isNaN(kickoffMs)) {
+    return false;
+  }
+
+  return now.getTime() >= kickoffMs;
 }
 
 function calculatePredictionPoints(match: Match, prediction: MatchPrediction): PredictionPoints {
