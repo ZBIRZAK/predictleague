@@ -168,6 +168,20 @@ type PredictionDraft = {
   redCardPlayersAway: string;
 };
 
+type PredictionSavePayload = {
+  groupId: string;
+  userUid: string;
+  matchId: number;
+  matchDate: string;
+  htHome: number;
+  htAway: number;
+  ftHome: number;
+  ftAway: number;
+  goalPlayers: string[];
+  yellowCardPlayers: string[];
+  redCardPlayers: string[];
+};
+
 type ProfileForm = {
   firstName: string;
   lastName: string;
@@ -318,6 +332,74 @@ function incidentPlayersForTeam(incidents: MatchIncident[] | undefined, team: Te
     .filter((item) => matchesTeam(String(item.team ?? '')))
     .map((item) => String(item.player ?? '').trim())
     .filter(Boolean);
+}
+
+function normalizePlayerPicksCsv(value: string) {
+  return parsePlayersInput(value)
+    .map((item) => normalizePlayerToken(item))
+    .filter(Boolean)
+    .sort();
+}
+
+function areStringArraysEqual(left: string[], right: string[]) {
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i += 1) {
+    if (left[i] !== right[i]) return false;
+  }
+  return true;
+}
+
+function isPredictionDraftDirty(draft: PredictionDraft, saved: MatchPrediction | undefined) {
+  const hasAnyDraftValue = [
+    draft.htHome,
+    draft.htAway,
+    draft.ftHome,
+    draft.ftAway,
+    draft.goalPlayersHome,
+    draft.goalPlayersAway,
+    draft.yellowCardPlayersHome,
+    draft.yellowCardPlayersAway,
+    draft.redCardPlayersHome,
+    draft.redCardPlayersAway
+  ].some((value) => value.trim() !== '');
+
+  if (!saved) return hasAnyDraftValue;
+
+  const draftHtHome = draft.htHome.trim() === '' ? null : Number(draft.htHome);
+  const draftHtAway = draft.htAway.trim() === '' ? null : Number(draft.htAway);
+  const draftFtHome = draft.ftHome.trim() === '' ? null : Number(draft.ftHome);
+  const draftFtAway = draft.ftAway.trim() === '' ? null : Number(draft.ftAway);
+
+  if (
+    !Number.isFinite(draftHtHome) ||
+    !Number.isFinite(draftHtAway) ||
+    !Number.isFinite(draftFtHome) ||
+    !Number.isFinite(draftFtAway)
+  ) {
+    return true;
+  }
+
+  if (
+    draftHtHome !== saved.ht_home ||
+    draftHtAway !== saved.ht_away ||
+    draftFtHome !== saved.ft_home ||
+    draftFtAway !== saved.ft_away
+  ) {
+    return true;
+  }
+
+  const savedGoal = splitTeamPlayerPicks(saved.goal_players);
+  const savedYellow = splitTeamPlayerPicks(saved.yellow_card_players);
+  const savedRed = splitTeamPlayerPicks(saved.red_card_players);
+
+  return (
+    !areStringArraysEqual(normalizePlayerPicksCsv(draft.goalPlayersHome), normalizePlayerPicksCsv(savedGoal.home)) ||
+    !areStringArraysEqual(normalizePlayerPicksCsv(draft.goalPlayersAway), normalizePlayerPicksCsv(savedGoal.away)) ||
+    !areStringArraysEqual(normalizePlayerPicksCsv(draft.yellowCardPlayersHome), normalizePlayerPicksCsv(savedYellow.home)) ||
+    !areStringArraysEqual(normalizePlayerPicksCsv(draft.yellowCardPlayersAway), normalizePlayerPicksCsv(savedYellow.away)) ||
+    !areStringArraysEqual(normalizePlayerPicksCsv(draft.redCardPlayersHome), normalizePlayerPicksCsv(savedRed.home)) ||
+    !areStringArraysEqual(normalizePlayerPicksCsv(draft.redCardPlayersAway), normalizePlayerPicksCsv(savedRed.away))
+  );
 }
 
 function colorFromText(input: string, saturation = 70, lightness = 48) {
@@ -650,6 +732,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [savingAll, setSavingAll] = useState(false);
   const [groupMatchesLoading, setGroupMatchesLoading] = useState(false);
+  const [matchSaveState, setMatchSaveState] = useState<Record<number, { status: 'saving' | 'saved' | 'error'; note?: string }>>({});
   const [perfectCongratsMatch, setPerfectCongratsMatch] = useState<string | null>(null);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const shownPerfectCongratsRef = useRef<Set<string>>(new Set());
@@ -745,6 +828,18 @@ function App() {
     }
     return total;
   }, [groupMatches, predictionDrafts]);
+
+  const unsavedDraftCount = useMemo(() => {
+    let total = 0;
+    for (const match of groupMatches) {
+      const draft = predictionDrafts[match.id];
+      if (!draft) continue;
+      if (isPredictionDraftDirty(draft, myPredictions[match.id])) {
+        total += 1;
+      }
+    }
+    return total;
+  }, [groupMatches, myPredictions, predictionDrafts]);
 
   useEffect(() => {
     const onHashChange = () => {
@@ -898,11 +993,13 @@ function App() {
       setGroupMembers([]);
       setGroupLeaderboardData(null);
       setGroupBonusMatches([]);
+      setMatchSaveState({});
       return;
     }
 
     setLockMinutesInput(String(selectedGroup.prediction_lock_minutes ?? 0));
     setBonusEnabledInput(Boolean(selectedGroup.bonus_enabled));
+    setMatchSaveState({});
     void loadGroupData(user.uid, selectedGroup);
   }, [selectedGroup, user, today]);
 
@@ -1720,47 +1817,23 @@ function App() {
     }
   }
 
-  async function handleSaveAllPredictions() {
-    if (!user || !selectedGroup) {
-      return;
+  function buildPredictionPayload(match: Match, draft: PredictionDraft): { payload: PredictionSavePayload } | { error: string } {
+    const values = [draft.htHome, draft.htAway, draft.ftHome, draft.ftAway];
+    if (values.some((value) => value === '')) {
+      return { error: 'Fill HT and FT scores first.' };
     }
 
-    const payloads: Array<{
-      groupId: string;
-      userUid: string;
-      matchId: number;
-      matchDate: string;
-      htHome: number;
-      htAway: number;
-      ftHome: number;
-      ftAway: number;
-      goalPlayers: string[];
-      yellowCardPlayers: string[];
-      redCardPlayers: string[];
-    }> = [];
-    let lockedMatches = 0;
+    const numeric = values.map((value) => Number(value));
+    if (numeric.some((value) => Number.isNaN(value) || value < 0)) {
+      return { error: 'Prediction values must be numbers >= 0.' };
+    }
 
-    for (const match of groupMatches) {
-      if (!isMatchOpenForPrediction(match, selectedGroup.prediction_lock_minutes)) {
-        lockedMatches += 1;
-        continue;
-      }
+    if (!selectedGroup || !user) {
+      return { error: 'You need to be logged in and select a group.' };
+    }
 
-      const draft = predictionDrafts[match.id];
-      if (!draft) continue;
-
-      const values = [draft.htHome, draft.htAway, draft.ftHome, draft.ftAway];
-      if (values.some((value) => value === '')) {
-        continue;
-      }
-
-      const numeric = values.map((value) => Number(value));
-      if (numeric.some((value) => Number.isNaN(value) || value < 0)) {
-        setError('One or more predictions are invalid. Use numbers >= 0.');
-        return;
-      }
-
-      payloads.push({
+    return {
+      payload: {
         groupId: selectedGroup.id,
         userUid: user.uid,
         matchId: match.id,
@@ -1772,7 +1845,79 @@ function App() {
         goalPlayers: encodeTeamPlayerPicks(draft.goalPlayersHome, draft.goalPlayersAway),
         yellowCardPlayers: encodeTeamPlayerPicks(draft.yellowCardPlayersHome, draft.yellowCardPlayersAway),
         redCardPlayers: encodeTeamPlayerPicks(draft.redCardPlayersHome, draft.redCardPlayersAway)
-      });
+      }
+    };
+  }
+
+  async function handleSaveSinglePrediction(match: Match, isOpenForPrediction: boolean) {
+    if (!selectedGroup || !user) return;
+    if (!isOpenForPrediction) {
+      setMatchSaveState((prev) => ({
+        ...prev,
+        [match.id]: { status: 'error', note: 'Locked (kickoff started).' }
+      }));
+      return;
+    }
+    const draft = predictionDrafts[match.id];
+    if (!draft) {
+      setMatchSaveState((prev) => ({
+        ...prev,
+        [match.id]: { status: 'error', note: 'No draft changes.' }
+      }));
+      return;
+    }
+
+    const built = buildPredictionPayload(match, draft);
+    if ('error' in built) {
+      setMatchSaveState((prev) => ({
+        ...prev,
+        [match.id]: { status: 'error', note: built.error }
+      }));
+      return;
+    }
+
+    try {
+      setMatchSaveState((prev) => ({ ...prev, [match.id]: { status: 'saving', note: 'Saving...' } }));
+      setError('');
+      await savePrediction(built.payload);
+      await refreshGroupRealtimeData(selectedGroup, user.uid, leaderboardScope);
+      setMatchSaveState((prev) => ({ ...prev, [match.id]: { status: 'saved', note: 'Saved' } }));
+    } catch (err) {
+      const note = err instanceof Error ? err.message : 'Save failed.';
+      setMatchSaveState((prev) => ({ ...prev, [match.id]: { status: 'error', note } }));
+    }
+  }
+
+  async function handleSaveAllPredictions() {
+    if (!user || !selectedGroup) {
+      return;
+    }
+
+    const payloads: PredictionSavePayload[] = [];
+    let lockedMatches = 0;
+
+    for (const match of groupMatches) {
+      if (!isMatchOpenForPrediction(match, selectedGroup.prediction_lock_minutes)) {
+        lockedMatches += 1;
+        setMatchSaveState((prev) => ({
+          ...prev,
+          [match.id]: { status: 'error', note: 'Locked (kickoff started).' }
+        }));
+        continue;
+      }
+
+      const draft = predictionDrafts[match.id];
+      if (!draft) continue;
+      const built = buildPredictionPayload(match, draft);
+      if ('error' in built) {
+        if (built.error.includes('numbers')) {
+          setError('One or more predictions are invalid. Use numbers >= 0.');
+          return;
+        }
+        continue;
+      }
+
+      payloads.push(built.payload);
     }
 
     if (payloads.length === 0) {
@@ -1787,10 +1932,31 @@ function App() {
     try {
       setSavingAll(true);
       setError('');
+      setMatchSaveState((prev) => {
+        const next = { ...prev };
+        for (const payload of payloads) {
+          next[payload.matchId] = { status: 'saving', note: 'Saving...' };
+        }
+        return next;
+      });
 
       const results = await Promise.allSettled(payloads.map((payload) => savePrediction(payload)));
       const successCount = results.filter((result) => result.status === 'fulfilled').length;
       const failCount = results.length - successCount;
+      setMatchSaveState((prev) => {
+        const next = { ...prev };
+        results.forEach((result, index) => {
+          const matchId = payloads[index]?.matchId;
+          if (!matchId) return;
+          if (result.status === 'fulfilled') {
+            next[matchId] = { status: 'saved', note: 'Saved' };
+            return;
+          }
+          const note = result.reason instanceof Error ? result.reason.message : 'Save failed.';
+          next[matchId] = { status: 'error', note };
+        });
+        return next;
+      });
       if (successCount === 0) {
         const firstError = results.find((result) => result.status === 'rejected');
         const message =
@@ -2641,6 +2807,7 @@ function App() {
                     <span className="group-chip">Matches: {groupMatches.length}</span>
                     <span className="group-chip">Completed Drafts: {completedDraftCount}</span>
                     <span className="group-chip">Saved: {Object.keys(myPredictions).length}</span>
+                    <span className={`group-chip ${unsavedDraftCount > 0 ? 'group-chip-warn' : ''}`}>Unsaved: {unsavedDraftCount}</span>
                   </div>
                   <button
                     type="button"
@@ -2684,6 +2851,14 @@ function App() {
                     const savedGoalSplit = splitTeamPlayerPicks(saved?.goal_players);
                     const savedYellowSplit = splitTeamPlayerPicks(saved?.yellow_card_players);
                     const savedRedSplit = splitTeamPlayerPicks(saved?.red_card_players);
+                    const isDraftComplete = [draft.htHome, draft.htAway, draft.ftHome, draft.ftAway].every((value) => value.trim() !== '');
+                    const draftDirty = isPredictionDraftDirty(draft, saved);
+                    const matchSave = matchSaveState[match.id];
+                    const kickoffMs = Date.parse(match.utcDate);
+                    const lockMs = Number.isFinite(kickoffMs)
+                      ? kickoffMs - Math.max(0, selectedGroup.prediction_lock_minutes ?? 0) * 60_000
+                      : NaN;
+                    const lockTimeLabel = Number.isFinite(lockMs) ? formatMatchDateTime(new Date(lockMs).toISOString()) : '';
                     const showEventResultState = match.status === 'FINISHED';
                     const goalPlayersHomeActual = incidentPlayersForTeam(match.incidents?.goals, match.homeTeam);
                     const goalPlayersAwayActual = incidentPlayersForTeam(match.incidents?.goals, match.awayTeam);
@@ -2926,6 +3101,22 @@ function App() {
                             </div>
                           </div>
                         </div>
+                        <div className="prediction-card-status">
+                          <span className={`prediction-draft-state ${draftDirty ? 'prediction-draft-dirty' : 'prediction-draft-clean'}`}>
+                            {draftDirty ? 'Unsaved changes' : saved ? 'Saved and synced' : 'No saved prediction yet'}
+                          </span>
+                          <button
+                            type="button"
+                            className="details-btn prediction-save-btn"
+                            disabled={!isOpenForPrediction || !isDraftComplete || !draftDirty || matchSave?.status === 'saving'}
+                            onClick={() => void handleSaveSinglePrediction(match, isOpenForPrediction)}
+                          >
+                            {matchSave?.status === 'saving' ? 'Saving...' : 'Save Match'}
+                          </button>
+                        </div>
+                        {matchSave?.note ? (
+                          <p className={`saved-line prediction-inline-note prediction-inline-note-${matchSave.status}`}>{matchSave.note}</p>
+                        ) : null}
                         {saved ? (
                           <p className="saved-line">
                             Saved: HT {saved.ht_home}-{saved.ht_away} | FT {saved.ft_home}-{saved.ft_away}
@@ -2946,7 +3137,12 @@ function App() {
                             Red picks: {match.homeTeam.tla ?? 'Home'} [{savedRedSplit.home || '-'}] | {match.awayTeam.tla ?? 'Away'} [{savedRedSplit.away || '-'}]
                           </p>
                         ) : null}
-                        {!isOpenForPrediction ? <p className="saved-line">Predictions locked for this match.</p> : null}
+                        {!isOpenForPrediction ? (
+                          <p className="saved-line">
+                            Predictions locked for this match{lockTimeLabel ? ` (lock time: ${lockTimeLabel})` : ''}.
+                          </p>
+                        ) : null}
+                        {isOpenForPrediction && lockTimeLabel ? <p className="saved-line">Lock time: {lockTimeLabel}</p> : null}
                         {saved && !shouldReveal ? (
                           <p className="saved-line">Predictions are private until lock time.</p>
                         ) : null}
