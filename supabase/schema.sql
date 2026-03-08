@@ -48,6 +48,9 @@ create table if not exists public.predictions (
   ht_away integer not null check (ht_away >= 0),
   ft_home integer not null check (ft_home >= 0),
   ft_away integer not null check (ft_away >= 0),
+  goal_players text[] not null default '{}',
+  yellow_card_players text[] not null default '{}',
+  red_card_players text[] not null default '{}',
   created_at timestamptz not null default now(),
   unique (group_id, match_id, user_uid)
 );
@@ -123,10 +126,22 @@ alter table public.groups alter column bonus_enabled set not null;
 
 alter table public.predictions add column if not exists match_kickoff_at timestamptz;
 alter table public.predictions add column if not exists lock_at timestamptz;
+alter table public.predictions add column if not exists goal_players text[];
+alter table public.predictions add column if not exists yellow_card_players text[];
+alter table public.predictions add column if not exists red_card_players text[];
 update public.predictions set match_kickoff_at = created_at where match_kickoff_at is null;
 update public.predictions set lock_at = match_kickoff_at where lock_at is null;
+update public.predictions set goal_players = '{}' where goal_players is null;
+update public.predictions set yellow_card_players = '{}' where yellow_card_players is null;
+update public.predictions set red_card_players = '{}' where red_card_players is null;
 alter table public.predictions alter column match_kickoff_at set not null;
 alter table public.predictions alter column lock_at set not null;
+alter table public.predictions alter column goal_players set default '{}';
+alter table public.predictions alter column yellow_card_players set default '{}';
+alter table public.predictions alter column red_card_players set default '{}';
+alter table public.predictions alter column goal_players set not null;
+alter table public.predictions alter column yellow_card_players set not null;
+alter table public.predictions alter column red_card_players set not null;
 
 alter table public.user_profiles add column if not exists reminders_enabled boolean;
 alter table public.user_profiles add column if not exists reminder_minutes_before integer;
@@ -165,7 +180,12 @@ returns trigger
 language plpgsql
 as $$
 begin
-  if now() >= old.lock_at then
+  if now() >= old.lock_at and (
+    new.ht_home is distinct from old.ht_home or
+    new.ht_away is distinct from old.ht_away or
+    new.ft_home is distinct from old.ft_home or
+    new.ft_away is distinct from old.ft_away
+  ) then
     raise exception 'Prediction is locked for this match.';
   end if;
   return new;

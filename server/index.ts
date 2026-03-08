@@ -7,7 +7,6 @@ import { createClient } from '@supabase/supabase-js';
 
 const app = express();
 const port = Number(process.env.PORT ?? 8787);
-const apiBase = 'https://api.football-data.org';
 
 app.use(express.json());
 
@@ -27,6 +26,8 @@ const paypalMode = (process.env.PAYPAL_MODE ?? 'sandbox').toLowerCase() === 'liv
 const paypalPlanPriceUsd = Number(process.env.PAYWALL_PRO_PRICE_USD ?? 4.99);
 const appBaseUrl = process.env.APP_BASE_URL ?? 'http://localhost:5173';
 const freeMaxOwnedGroups = Number(process.env.FREE_MAX_OWNED_GROUPS ?? 1);
+const footballDataApiKey = process.env.FOOTBALL_DATA_API_KEY ?? '';
+const footballDataApiBase = 'https://api.football-data.org';
 const paypalApiBase =
   paypalMode === 'live' ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com';
 
@@ -58,34 +59,31 @@ let smtpLastVerifyError: string | null = null;
 const inviteRateLimitStore = new Map<string, number[]>();
 const INVITE_RATE_WINDOW_MS = 60_000;
 const INVITE_RATE_LIMIT = 8;
-const footballApiUsageState: {
-  remainingMinute: number | null;
-  limitMinute: number | null;
-  resetInSeconds: number | null;
-  updatedAt: string | null;
-} = {
-  remainingMinute: null,
-  limitMinute: null,
-  resetInSeconds: null,
-  updatedAt: null
-};
-const footballApiUsageStreams = new Set<express.Response>();
+const espnGetCache = new Map<string, { bodyText: string; expiresAt: number }>();
+const espnGetInflight = new Map<string, Promise<string>>();
+const espnEventById = new Map<number, Record<string, unknown>>();
+const espnTeamById = new Map<number, Record<string, unknown>>();
+const espnLeagueByEventId = new Map<number, string>();
+const espnLeagueByTeamId = new Map<number, string>();
 
 type AuthContext = {
   uid: string;
   email: string;
 };
 
-type MatchApiResponse = {
-  match?: MatchApi;
-} & MatchApi;
-
 type MatchApi = {
   id?: number;
   status?: string;
   utcDate?: string;
   matchday?: number;
+  homeTeam?: { name?: string };
+  awayTeam?: { name?: string };
   competition?: { id?: number };
+  incidents?: {
+    goals?: Array<{ minute?: string; team?: string; player?: string; text?: string }>;
+    yellowCards?: Array<{ minute?: string; team?: string; player?: string; text?: string }>;
+    redCards?: Array<{ minute?: string; team?: string; player?: string; text?: string }>;
+  };
   score?: {
     winner?: 'HOME_TEAM' | 'AWAY_TEAM' | 'DRAW' | null;
     halfTime?: { home?: number | null; away?: number | null };
@@ -189,39 +187,1278 @@ function isValidEmail(value: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
 
-function parseHeaderNumber(headers: Headers, keys: string[]) {
-  for (const key of keys) {
-    const raw = headers.get(key);
-    if (!raw) continue;
-    const value = Number(raw);
-    if (Number.isFinite(value)) {
-      return value;
+function parseYmd(value: string) {
+  const dt = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(dt.getTime())) return null;
+  return dt;
+}
+
+function toYmd(value: Date) {
+  const y = value.getUTCFullYear();
+  const m = String(value.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(value.getUTCDate()).padStart(2, '0');
+  return `${y}${m}${d}`;
+}
+
+function enumerateDates(from: string, to: string) {
+  const start = parseYmd(from);
+  const end = parseYmd(to);
+  if (!start || !end || end < start) return [];
+  const dates: string[] = [];
+  const current = new Date(start.getTime());
+  while (current <= end && dates.length < 7) {
+    dates.push(toYmd(current));
+    current.setUTCDate(current.getUTCDate() + 1);
+  }
+  return dates;
+}
+
+function mapEspnStatus(statusTypeInput: Record<string, unknown>) {
+  const name = String(statusTypeInput.name ?? '').toUpperCase();
+  const state = String(statusTypeInput.state ?? '').toLowerCase();
+  const detail = `${String(statusTypeInput.detail ?? '')} ${String(statusTypeInput.shortDetail ?? '')}`.toLowerCase();
+
+  if (state === 'post' || Boolean(statusTypeInput.completed) || name.includes('FINAL') || name.includes('FULL_TIME')) {
+    return 'FINISHED';
+  }
+
+  if (state === 'in') {
+    const isHalftimeLike =
+      name === 'STATUS_HALFTIME' ||
+      name.includes('HALF_TIME') ||
+      name.includes('BREAK') ||
+      detail.includes('half-time') ||
+      detail.includes('halftime');
+    if (isHalftimeLike) {
+      return 'PAUSED';
+    }
+    return 'LIVE';
+  }
+
+  if (name.includes('PAUSED')) return 'PAUSED';
+  return 'TIMED';
+}
+
+function mapEspnWinner(homeScore: number | null, awayScore: number | null): 'HOME_TEAM' | 'AWAY_TEAM' | 'DRAW' | null {
+  if (homeScore === null || awayScore === null) return null;
+  if (homeScore > awayScore) return 'HOME_TEAM';
+  if (awayScore > homeScore) return 'AWAY_TEAM';
+  return 'DRAW';
+}
+
+function asNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const cleaned = value.replace(/[^0-9.+-]/g, '');
+    const n = Number(cleaned);
+    if (Number.isFinite(n)) return n;
+  }
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    const nested = asNumber(obj.value ?? obj.displayValue ?? obj.rawValue);
+    if (nested !== null) return nested;
+  }
+  return null;
+}
+
+async function fetchEspnJson(path: string, ttlMs = 12000) {
+  const url = `https://site.api.espn.com${path}`;
+  const now = Date.now();
+  const cached = espnGetCache.get(url);
+  if (cached && cached.expiresAt > now) {
+    return JSON.parse(cached.bodyText) as Record<string, unknown>;
+  }
+
+  const inflight = espnGetInflight.get(url);
+  if (inflight) {
+    const text = await inflight;
+    return JSON.parse(text) as Record<string, unknown>;
+  }
+
+  const promise = (async () => {
+    const response = await fetch(url, { headers: { Accept: 'application/json', 'User-Agent': 'PredictLeague/1.0' } });
+    if (!response.ok) {
+      throw new Error(`ESPN request failed (${response.status}).`);
+    }
+    const text = await response.text();
+    espnGetCache.set(url, { bodyText: text, expiresAt: Date.now() + ttlMs });
+    return text;
+  })();
+
+  espnGetInflight.set(url, promise);
+  try {
+    const text = await promise;
+    return JSON.parse(text) as Record<string, unknown>;
+  } finally {
+    espnGetInflight.delete(url);
+  }
+}
+
+async function fetchEspnCoreJson(urlOrPath: string, ttlMs = 90000) {
+  const rawUrl = urlOrPath.startsWith('http')
+    ? urlOrPath
+    : `https://sports.core.api.espn.com${urlOrPath.startsWith('/') ? '' : '/'}${urlOrPath}`;
+  const url = new URL(rawUrl);
+  if (!url.searchParams.has('lang')) url.searchParams.set('lang', 'en');
+  if (!url.searchParams.has('region')) url.searchParams.set('region', 'us');
+  const key = url.toString();
+  const now = Date.now();
+  const cached = espnGetCache.get(key);
+  if (cached && cached.expiresAt > now) {
+    return JSON.parse(cached.bodyText) as Record<string, unknown>;
+  }
+
+  const inflight = espnGetInflight.get(key);
+  if (inflight) {
+    const text = await inflight;
+    return JSON.parse(text) as Record<string, unknown>;
+  }
+
+  const promise = (async () => {
+    const response = await fetch(key, { headers: { Accept: 'application/json', 'User-Agent': 'PredictLeague/1.0' } });
+    if (!response.ok) {
+      throw new Error(`ESPN core request failed (${response.status}).`);
+    }
+    const text = await response.text();
+    espnGetCache.set(key, { bodyText: text, expiresAt: Date.now() + ttlMs });
+    return text;
+  })();
+  espnGetInflight.set(key, promise);
+  try {
+    const text = await promise;
+    return JSON.parse(text) as Record<string, unknown>;
+  } finally {
+    espnGetInflight.delete(key);
+  }
+}
+
+function getRefFromNode(value: unknown): string | null {
+  if (!value || typeof value !== 'object') return null;
+  const ref = (value as Record<string, unknown>).$ref;
+  return typeof ref === 'string' && ref.length > 0 ? ref : null;
+}
+
+function collectRefs(value: unknown, out: Set<string>, depth = 0) {
+  if (!value || typeof value !== 'object' || depth > 8) return;
+  const obj = value as Record<string, unknown>;
+  const ref = getRefFromNode(obj);
+  if (ref) out.add(ref);
+  for (const child of Object.values(obj)) {
+    if (Array.isArray(child)) {
+      for (const item of child) collectRefs(item, out, depth + 1);
+    } else if (child && typeof child === 'object') {
+      collectRefs(child, out, depth + 1);
+    }
+  }
+}
+
+async function resolveCoreObject(value: unknown): Promise<Record<string, unknown> | null> {
+  if (!value) return null;
+  if (typeof value !== 'object') return null;
+  const ref = getRefFromNode(value);
+  if (ref) return fetchEspnCoreJson(ref, 90000);
+  return value as Record<string, unknown>;
+}
+
+async function resolveCoreCollection(value: unknown): Promise<Array<Record<string, unknown>>> {
+  if (Array.isArray(value)) {
+    return value.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object');
+  }
+  if (!value || typeof value !== 'object') return [];
+  const ref = getRefFromNode(value);
+  if (ref) {
+    const payload = await fetchEspnCoreJson(ref, 90000);
+    return resolveCoreCollection(payload.items ?? payload.entries ?? payload.leaders ?? []);
+  }
+  const obj = value as Record<string, unknown>;
+  if (Array.isArray(obj.items)) return resolveCoreCollection(obj.items);
+  if (Array.isArray(obj.entries)) return resolveCoreCollection(obj.entries);
+  if (Array.isArray(obj.leaders)) return resolveCoreCollection(obj.leaders);
+  return [];
+}
+
+const ESPN_COMPETITIONS: Record<string, { id: number; name: string; areaName: string }> = {
+  'fifa.world': { id: 32017, name: 'FIFA World Cup', areaName: 'World' },
+  'uefa.euro': { id: 32018, name: 'UEFA European Championship', areaName: 'Europe' },
+  'caf.nations': { id: 32019, name: 'Africa Cup of Nations', areaName: 'Africa' },
+  'uefa.champions': { id: 2001, name: 'UEFA Champions League', areaName: 'Europe' },
+  'uefa.europa': { id: 32001, name: 'UEFA Europa League', areaName: 'Europe' },
+  'uefa.europa.conf': { id: 32002, name: 'UEFA Conference League', areaName: 'Europe' },
+  'eng.1': { id: 2021, name: 'Premier League', areaName: 'England' },
+  'eng.2': { id: 32003, name: 'Championship', areaName: 'England' },
+  'esp.1': { id: 2014, name: 'Primera Division', areaName: 'Spain' },
+  'esp.2': { id: 32004, name: 'Segunda Division', areaName: 'Spain' },
+  'ger.1': { id: 2002, name: 'Bundesliga', areaName: 'Germany' },
+  'ger.2': { id: 32005, name: '2. Bundesliga', areaName: 'Germany' },
+  'ita.1': { id: 2019, name: 'Serie A', areaName: 'Italy' },
+  'ita.2': { id: 32006, name: 'Serie B', areaName: 'Italy' },
+  'fra.1': { id: 2015, name: 'Ligue 1', areaName: 'France' },
+  'fra.2': { id: 32007, name: 'Ligue 2', areaName: 'France' },
+  'por.1': { id: 32008, name: 'Primeira Liga', areaName: 'Portugal' },
+  'ned.1': { id: 32009, name: 'Eredivisie', areaName: 'Netherlands' },
+  'bel.1': { id: 32010, name: 'Belgian Pro League', areaName: 'Belgium' },
+  'sco.1': { id: 32011, name: 'Scottish Premiership', areaName: 'Scotland' },
+  'tur.1': { id: 32012, name: 'Super Lig', areaName: 'Turkey' },
+  'usa.1': { id: 32013, name: 'MLS', areaName: 'United States' },
+  'mex.1': { id: 32014, name: 'Liga MX', areaName: 'Mexico' },
+  'arg.1': { id: 32015, name: 'Liga Profesional', areaName: 'Argentina' },
+  'bra.1': { id: 32016, name: 'Brasileirao Serie A', areaName: 'Brazil' }
+};
+const ESPN_LEAGUES = Object.keys(ESPN_COMPETITIONS);
+const FOOTBALL_COMPETITION_TO_ESPN: Record<number, string> = Object.fromEntries(
+  Object.entries(ESPN_COMPETITIONS).map(([league, meta]) => [meta.id, league])
+);
+const FOOTBALL_DATA_COMPETITION_CODE_BY_ESPN_LEAGUE: Record<string, string> = {
+  'uefa.champions': 'CL',
+  'uefa.europa': 'EL',
+  'uefa.europa.conf': 'ECL',
+  'eng.1': 'PL',
+  'eng.2': 'ELC',
+  'esp.1': 'PD',
+  'ger.1': 'BL1',
+  'ger.2': 'BL2',
+  'ita.1': 'SA',
+  'fra.1': 'FL1',
+  'ned.1': 'DED',
+  'por.1': 'PPL'
+};
+
+function getEspnLeagueByFootballCompetitionId(value: number) {
+  return FOOTBALL_COMPETITION_TO_ESPN[value];
+}
+
+function getEspnCompetitionByLeague(league: string) {
+  return ESPN_COMPETITIONS[league];
+}
+
+function pickEspnLogoUrl(primary: Record<string, unknown> | null | undefined, secondary?: Record<string, unknown> | null) {
+  const primaryLogos = Array.isArray(primary?.logos) ? (primary?.logos as Array<Record<string, unknown>>) : [];
+  const secondaryLogos = Array.isArray(secondary?.logos) ? (secondary?.logos as Array<Record<string, unknown>>) : [];
+  const candidate =
+    String(primaryLogos[0]?.href ?? '') ||
+    String(primary?.logo ?? '') ||
+    String(secondaryLogos[0]?.href ?? '') ||
+    String(secondary?.logo ?? '');
+  if (candidate) return candidate;
+
+  const teamId = asNumber(primary?.id ?? secondary?.id);
+  if (teamId && teamId > 0) {
+    return `https://a.espncdn.com/i/teamlogos/soccer/500/${teamId}.png`;
+  }
+  return '';
+}
+
+function getSeasonCandidates() {
+  const now = new Date();
+  const current = now.getUTCMonth() >= 6 ? now.getUTCFullYear() : now.getUTCFullYear() - 1;
+  return [current, current - 1, current + 1];
+}
+
+type CoreTeamAthlete = {
+  id?: number;
+  name?: string;
+  position?: string;
+  nationality?: string;
+  dateOfBirth?: string;
+};
+
+async function fetchCoreTeamWithAthletes(league: string, teamId: number) {
+  const candidates = [
+    `/v2/sports/soccer/leagues/${league}/teams/${teamId}`,
+    ...getSeasonCandidates().map((season) => `/v2/sports/soccer/leagues/${league}/seasons/${season}/teams/${teamId}`)
+  ];
+  for (const path of candidates) {
+    try {
+      const payload = await fetchEspnCoreJson(path, 90000);
+      const athletes = await resolveCoreCollection(
+        (payload as Record<string, unknown>).athletes ?? (payload as Record<string, unknown>).roster ?? []
+      );
+      if (athletes.length > 0) {
+        return payload;
+      }
+    } catch {
+      // Try next candidate.
     }
   }
   return null;
 }
 
-function updateFootballApiUsage(headers: Headers) {
-  footballApiUsageState.remainingMinute = parseHeaderNumber(headers, [
-    'x-requests-available-minute',
-    'x-ratelimit-remaining',
-    'x-rate-limit-remaining'
-  ]);
-  footballApiUsageState.limitMinute = parseHeaderNumber(headers, [
-    'x-requests-limit-minute',
-    'x-ratelimit-limit',
-    'x-rate-limit-limit'
-  ]);
-  footballApiUsageState.resetInSeconds = parseHeaderNumber(headers, [
-    'x-requests-reset',
-    'x-ratelimit-reset',
-    'x-rate-limit-reset'
-  ]);
-  footballApiUsageState.updatedAt = new Date().toISOString();
-  const payload = `data: ${JSON.stringify(footballApiUsageState)}\n\n`;
-  for (const stream of footballApiUsageStreams) {
-    stream.write(payload);
+async function fetchCoreTeamSquad(league: string, teamId: number): Promise<CoreTeamAthlete[]> {
+  const teamPayload = await fetchCoreTeamWithAthletes(league, teamId);
+  if (!teamPayload) return [];
+  const athletes = await resolveCoreCollection(
+    (teamPayload as Record<string, unknown>).athletes ?? (teamPayload as Record<string, unknown>).roster ?? []
+  );
+  const squad = athletes
+    .map((item) => {
+      const position = (item.position as Record<string, unknown> | undefined) ?? {};
+      const birthDate = String(item.dateOfBirth ?? '');
+      return {
+        id: asNumber(item.id) ?? undefined,
+        name: String(item.displayName ?? item.fullName ?? item.shortName ?? item.name ?? '').trim(),
+        position: String(position.abbreviation ?? position.name ?? ''),
+        nationality: String(item.nationality ?? (item.citizenship as string | undefined) ?? ''),
+        dateOfBirth: birthDate ? birthDate : undefined
+      };
+    })
+    .filter((item) => item.name);
+  const seen = new Set<string>();
+  return squad.filter((item) => {
+    const key = item.name?.toLowerCase() ?? '';
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function mapSiteRosterAthletes(payload: Record<string, unknown>): CoreTeamAthlete[] {
+  const buckets: unknown[] = [];
+  const tryPush = (value: unknown) => {
+    if (Array.isArray(value)) buckets.push(...value);
+  };
+  const walk = (value: unknown, depth = 0) => {
+    if (!value || typeof value !== 'object' || depth > 6) return;
+    const obj = value as Record<string, unknown>;
+    tryPush(obj.athletes);
+    tryPush(obj.players);
+    for (const child of Object.values(obj)) {
+      if (Array.isArray(child)) {
+        for (const item of child) walk(item, depth + 1);
+      } else if (child && typeof child === 'object') {
+        walk(child, depth + 1);
+      }
+    }
+  };
+  walk(payload);
+  const mapped = buckets
+    .map((item) => item as Record<string, unknown>)
+    .map((item) => {
+      const position = (item.position as Record<string, unknown> | undefined) ?? {};
+      return {
+        id: asNumber(item.id) ?? undefined,
+        name: String(item.displayName ?? item.fullName ?? item.shortName ?? item.name ?? '').trim(),
+        position: String(position.abbreviation ?? position.name ?? ''),
+        nationality: String(item.nationality ?? ''),
+        dateOfBirth: String(item.dateOfBirth ?? '') || undefined
+      };
+    })
+    .filter((item) => item.name);
+  const seen = new Set<string>();
+  return mapped.filter((item) => {
+    const key = item.name?.toLowerCase() ?? '';
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function fetchSiteTeamSquad(league: string, teamId: number): Promise<CoreTeamAthlete[]> {
+  const candidates = [
+    `/apis/site/v2/sports/soccer/${league}/teams/${teamId}/roster`,
+    `/apis/site/v2/sports/soccer/${league}/teams/${teamId}`
+  ];
+  for (const path of candidates) {
+    try {
+      const payload = await fetchEspnJson(path, 60000);
+      const squad = mapSiteRosterAthletes(payload);
+      if (squad.length > 0) return squad;
+    } catch {
+      // Continue.
+    }
   }
+  return [];
+}
+
+async function extractEspnIncidents(summaryPayload: Record<string, unknown>) {
+  const detailCandidates: unknown[] = [];
+  const pushArray = (value: unknown) => {
+    if (Array.isArray(value)) {
+      detailCandidates.push(...value);
+    }
+  };
+  const walk = (value: unknown, depth = 0) => {
+    if (!value || typeof value !== 'object' || depth > 6) return;
+    const obj = value as Record<string, unknown>;
+    pushArray(obj.details);
+    pushArray(obj.scoringPlays);
+    pushArray(obj.plays);
+    pushArray(obj.cards);
+    pushArray(obj.keyEvents);
+    for (const child of Object.values(obj)) {
+      if (child && typeof child === 'object') {
+        walk(child, depth + 1);
+      }
+    }
+  };
+
+  walk(summaryPayload);
+
+  const detailsResolved = await Promise.all(
+    detailCandidates.map(async (item) => {
+      const detail = await resolveCoreObject(item);
+      if (!detail) return null;
+      const typeResolved = await resolveCoreObject(detail.type);
+      if (typeResolved) detail.type = typeResolved;
+      const teamResolved = await resolveCoreObject(detail.team);
+      if (teamResolved) detail.team = teamResolved;
+      const athleteResolved = await resolveCoreObject(detail.athlete);
+      if (athleteResolved) detail.athlete = athleteResolved;
+      const playerResolved = await resolveCoreObject(detail.player);
+      if (playerResolved) detail.player = playerResolved;
+      if (Array.isArray(detail.athletesInvolved)) {
+        const athletesResolved = await Promise.all(
+          (detail.athletesInvolved as Array<unknown>).map(async (athlete) => (await resolveCoreObject(athlete)) ?? null)
+        );
+        detail.athletesInvolved = athletesResolved.filter((athlete): athlete is Record<string, unknown> => athlete !== null);
+      }
+      return detail;
+    })
+  );
+  const details = detailsResolved.filter((item): item is Record<string, unknown> => item !== null);
+  const headerCompetition = ((summaryPayload.header as Record<string, unknown> | undefined)?.competitions as
+    | Array<Record<string, unknown>>
+    | undefined)?.[0];
+  const competitors = Array.isArray(headerCompetition?.competitors)
+    ? (headerCompetition?.competitors as Array<unknown>)
+    : [];
+  const teamNameById = new Map<string, string>();
+  for (const rawCompetitor of competitors) {
+    const competitor = (await resolveCoreObject(rawCompetitor)) ?? {};
+    const team = ((await resolveCoreObject(competitor.team)) ?? {}) as Record<string, unknown>;
+    const id = String(team.id ?? competitor.id ?? competitor.teamId ?? '');
+    if (!id) continue;
+    teamNameById.set(id, String(team.displayName ?? team.shortDisplayName ?? team.name ?? ''));
+  }
+
+  const getMinute = (detail: Record<string, unknown>) => {
+    const clock = (detail.clock as Record<string, unknown> | undefined) ?? {};
+    const displayValue = clock.displayValue;
+    if (typeof displayValue === 'string' && displayValue.trim()) {
+      return displayValue.trim();
+    }
+    const clockMinute = asNumber(clock.value);
+    if (clockMinute !== null) {
+      const normalized = clockMinute > 200 ? Math.round(clockMinute / 60) : Math.round(clockMinute);
+      return `${normalized}'`;
+    }
+    const directMinute = asNumber(detail.time);
+    if (directMinute !== null) return `${directMinute}'`;
+    const text = String(detail.text ?? detail.shortText ?? detail.description ?? detail.headline ?? '').trim();
+    const minuteMatch = text.match(/(\d{1,3}(?:\+\d{1,2})?)'/);
+    const inferred = minuteMatch ? `${minuteMatch[1]}'` : '';
+    return inferred === '[object Object]' ? '' : inferred;
+  };
+  const getTeam = (detail: Record<string, unknown>) => {
+    const detailTeam = (detail.team as Record<string, unknown> | undefined) ?? {};
+    const detailTeamId = String(detailTeam.id ?? detail.teamId ?? detail.competitorId ?? '');
+    return teamNameById.get(detailTeamId) ?? String(detailTeam.displayName ?? detailTeam.name ?? '');
+  };
+  const getPlayer = (detail: Record<string, unknown>) => {
+    const athlete = (detail.athlete as Record<string, unknown> | undefined) ?? {};
+    if (athlete.displayName || athlete.fullName || athlete.name) {
+      return String(athlete.displayName ?? athlete.fullName ?? athlete.name ?? '');
+    }
+    const athletes = Array.isArray(detail.athletesInvolved) ? (detail.athletesInvolved as Array<Record<string, unknown>>) : [];
+    const first = athletes[0] ?? ((detail.player as Record<string, unknown> | undefined) ?? {});
+    const fromFields = String(first.displayName ?? first.fullName ?? first.name ?? '').trim();
+    if (fromFields) return fromFields;
+    const text = String(detail.text ?? detail.shortText ?? detail.description ?? '').trim();
+    // Common ESPN formats:
+    // "Rubén García (Osasuna) is shown the yellow card ..."
+    // "Goal! Osasuna 2, Mallorca 2. Ante Budimir (Osasuna) left footed shot ..."
+    const afterGoalPrefix = text.match(/Goal!\s*[^.]*\.\s*([^()]+)\s*\(/i);
+    if (afterGoalPrefix?.[1]) return afterGoalPrefix[1].trim();
+    const leadingName = text.match(/^([^()]+)\s*\(/);
+    if (leadingName?.[1]) return leadingName[1].trim();
+    return '';
+  };
+  const describe = (detail: Record<string, unknown>) => {
+    const type = (detail.type as Record<string, unknown> | undefined) ?? {};
+    return [
+      detail.text,
+      detail.shortText,
+      detail.description,
+      detail.headline,
+      detail.displayValue,
+      type.text,
+      type.name,
+      type.description,
+      type.displayName,
+      type.shortName,
+      type.abbreviation
+    ]
+      .map((value) => String(value ?? '').trim())
+      .filter((value) => value.length > 0)
+      .join(' ');
+  };
+  const displayText = (detail: Record<string, unknown>) =>
+    String(detail.text ?? detail.shortText ?? detail.description ?? detail.headline ?? '').trim();
+  const build = (detail: Record<string, unknown>) => ({
+    minute: getMinute(detail),
+    team: getTeam(detail),
+    player: getPlayer(detail),
+    text: displayText(detail)
+  });
+
+  const unique = (rows: Array<{ minute: string; team: string; player: string; text: string }>) => {
+    const seen = new Set<string>();
+    return rows.filter((row) => {
+      const key = `${row.minute}|${row.team}|${row.player}|${row.text}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+
+  const classifyText = (detail: Record<string, unknown>) => describe(detail).toLowerCase();
+  const classifyType = (detail: Record<string, unknown>) =>
+    String(
+      ((detail.type as Record<string, unknown> | undefined)?.text ??
+        (detail.type as Record<string, unknown> | undefined)?.name ??
+        (detail.type as Record<string, unknown> | undefined)?.abbreviation ??
+        detail.type) ??
+        ''
+    ).toLowerCase();
+
+  const goals = details
+    .filter((detail) => {
+      const type = classifyType(detail);
+      const text = classifyText(detail);
+      return (
+        (Boolean((detail as { scoringPlay?: unknown }).scoringPlay) &&
+          !/\battempt saved\b|\bsaved\b|\boff target\b|\bwide\b/.test(text)) ||
+        /^goal!/i.test(text) ||
+        /\bpenalty scored\b|\bown goal\b/.test(text) ||
+        type.includes('goal') ||
+        type.includes('score') ||
+        type === 'g' ||
+        type === 'pg' ||
+        type === 'og'
+      );
+    })
+    .map(build)
+    .filter((row) => row.text.length > 0);
+
+  const yellowCards = details
+    .filter((detail) => {
+      const type = classifyType(detail);
+      const text = classifyText(detail);
+      return (
+        /\bshown the yellow card\b|\byellow card\b|\bbooked\b|\bcaution\b/.test(text) ||
+        type.includes('yellow') ||
+        type === 'yc'
+      );
+    })
+    .map(build)
+    .filter((row) => row.text.length > 0);
+
+  const redCards = details
+    .filter((detail) => {
+      const type = classifyType(detail);
+      const text = classifyText(detail);
+      return /\bshown the red card\b|\bred card\b|\bsent off\b|\bdismissed\b/.test(text) || type.includes('red') || type === 'rc';
+    })
+    .map(build)
+    .filter((row) => row.text.length > 0);
+
+  const normalizeRows = (rows: Array<{ minute: string; team: string; player: string; text: string }>) => {
+    const deduped = unique(rows)
+      .filter((row) => row.text.length > 0)
+      .map((row) => ({
+        ...row,
+        minute: row.minute === '[object Object]' ? '' : row.minute
+      }));
+
+    const byText = new Map<string, { minute: string; team: string; player: string; text: string }>();
+    for (const row of deduped) {
+      const key = row.text.toLowerCase().replace(/\s+/g, ' ').trim();
+      const existing = byText.get(key);
+      if (!existing) {
+        byText.set(key, row);
+        continue;
+      }
+      const existingScore = (existing.team ? 2 : 0) + (existing.minute ? 1 : 0);
+      const rowScore = (row.team ? 2 : 0) + (row.minute ? 1 : 0);
+      if (rowScore > existingScore) {
+        byText.set(key, row);
+      }
+    }
+    return Array.from(byText.values());
+  };
+
+  return {
+    goals: normalizeRows(goals),
+    yellowCards: normalizeRows(yellowCards),
+    redCards: normalizeRows(redCards)
+  };
+}
+
+function normalizeEspnEvent(event: Record<string, unknown>, leagueFallback?: Record<string, unknown>, leagueKey?: string) {
+  const competition = Array.isArray(event.competitions) ? (event.competitions[0] as Record<string, unknown> | undefined) : undefined;
+  const competitors = Array.isArray(competition?.competitors) ? (competition?.competitors as Array<Record<string, unknown>>) : [];
+  const home = competitors.find((c) => String(c.homeAway ?? '').toLowerCase() === 'home') ?? competitors[0];
+  const away = competitors.find((c) => String(c.homeAway ?? '').toLowerCase() === 'away') ?? competitors[1];
+  const homeTeam = (home?.team ?? {}) as Record<string, unknown>;
+  const awayTeam = (away?.team ?? {}) as Record<string, unknown>;
+  const statusType = (((event.status as Record<string, unknown> | undefined)?.type ?? {}) as Record<string, unknown>);
+  const status = mapEspnStatus(statusType);
+  const homeScore = asNumber(home?.score);
+  const awayScore = asNumber(away?.score);
+  const homeLines = Array.isArray(home?.linescores) ? (home?.linescores as Array<Record<string, unknown>>) : [];
+  const awayLines = Array.isArray(away?.linescores) ? (away?.linescores as Array<Record<string, unknown>>) : [];
+  const htHome = asNumber(homeLines[0]?.value);
+  const htAway = asNumber(awayLines[0]?.value);
+  const eventLeague = Array.isArray((event.leagues as unknown[]))
+    ? ((event.leagues as Array<Record<string, unknown>>)[0] ?? {})
+    : {};
+  const league = Object.keys(eventLeague).length > 0 ? eventLeague : leagueFallback ?? {};
+  const mappedCompetition = leagueKey ? getEspnCompetitionByLeague(leagueKey) : undefined;
+  const areaName = String((league.country as Record<string, unknown> | undefined)?.name ?? '');
+
+  const normalized = {
+    id: asNumber(event.id) ?? 0,
+    utcDate: String(event.date ?? ''),
+    status,
+    homeTeam: {
+      id: asNumber(homeTeam.id) ?? undefined,
+      name: String(homeTeam.displayName ?? homeTeam.shortDisplayName ?? 'Home'),
+      shortName: String(homeTeam.shortDisplayName ?? homeTeam.abbreviation ?? ''),
+      tla: String(homeTeam.abbreviation ?? ''),
+      crest: pickEspnLogoUrl(homeTeam, home as Record<string, unknown>),
+      venue: String((competition?.venue as Record<string, unknown> | undefined)?.fullName ?? ''),
+      nickname: String(homeTeam.nickname ?? ''),
+      color: String(homeTeam.color ?? ''),
+      alternateColor: String(homeTeam.alternateColor ?? ''),
+      form: String((home as Record<string, unknown> | undefined)?.form ?? '')
+    },
+    awayTeam: {
+      id: asNumber(awayTeam.id) ?? undefined,
+      name: String(awayTeam.displayName ?? awayTeam.shortDisplayName ?? 'Away'),
+      shortName: String(awayTeam.shortDisplayName ?? awayTeam.abbreviation ?? ''),
+      tla: String(awayTeam.abbreviation ?? ''),
+      crest: pickEspnLogoUrl(awayTeam, away as Record<string, unknown>),
+      venue: String((competition?.venue as Record<string, unknown> | undefined)?.fullName ?? ''),
+      nickname: String(awayTeam.nickname ?? ''),
+      color: String(awayTeam.color ?? ''),
+      alternateColor: String(awayTeam.alternateColor ?? ''),
+      form: String((away as Record<string, unknown> | undefined)?.form ?? '')
+    },
+    score: {
+      winner: mapEspnWinner(homeScore, awayScore),
+      halfTime: { home: htHome, away: htAway },
+      fullTime: { home: homeScore, away: awayScore }
+    },
+    competition: {
+      id: mappedCompetition?.id ?? asNumber(league.id) ?? 0,
+      name: mappedCompetition?.name ?? String(league.name ?? 'Competition'),
+      area: { name: mappedCompetition?.areaName ?? (areaName || 'Unknown') }
+    },
+    area: { name: mappedCompetition?.areaName ?? (areaName || 'Unknown') },
+    venue: String((competition?.venue as Record<string, unknown> | undefined)?.fullName ?? ''),
+    matchday: asNumber((competition?.week as Record<string, unknown> | undefined)?.number) ?? undefined
+  };
+
+  const eventId = normalized.id;
+  if (eventId > 0) {
+    espnEventById.set(eventId, event);
+    if (leagueKey) {
+      espnLeagueByEventId.set(eventId, leagueKey);
+    }
+  }
+  const homeTeamId = normalized.homeTeam.id ?? 0;
+  const awayTeamId = normalized.awayTeam.id ?? 0;
+  if (homeTeamId > 0) espnTeamById.set(homeTeamId, homeTeam);
+  if (awayTeamId > 0) espnTeamById.set(awayTeamId, awayTeam);
+  if (leagueKey) {
+    if (homeTeamId > 0) espnLeagueByTeamId.set(homeTeamId, leagueKey);
+    if (awayTeamId > 0) espnLeagueByTeamId.set(awayTeamId, leagueKey);
+  }
+
+  return normalized;
+}
+
+async function enrichMatchScoreFromSummary(
+  match: MatchApi,
+  leagueKey: string,
+  matchId: number
+): Promise<MatchApi> {
+  try {
+    const summary = await fetchEspnJson(`/apis/site/v2/sports/soccer/${leagueKey}/summary?event=${matchId}`, 12000);
+    const summaryCompetition = Array.isArray((summary.header as Record<string, unknown> | undefined)?.competitions)
+      ? (((summary.header as Record<string, unknown>).competitions as Array<Record<string, unknown>>)[0] ?? null)
+      : null;
+    const summaryCompetitors = Array.isArray(summaryCompetition?.competitors)
+      ? (summaryCompetition?.competitors as Array<Record<string, unknown>>)
+      : [];
+    const summaryHome = summaryCompetitors.find(
+      (item) => String((item.homeAway as string | undefined) ?? '').toLowerCase() === 'home'
+    );
+    const summaryAway = summaryCompetitors.find(
+      (item) => String((item.homeAway as string | undefined) ?? '').toLowerCase() === 'away'
+    );
+    const summaryHomeLines = Array.isArray(summaryHome?.linescores)
+      ? (summaryHome?.linescores as Array<Record<string, unknown>>)
+      : [];
+    const summaryAwayLines = Array.isArray(summaryAway?.linescores)
+      ? (summaryAway?.linescores as Array<Record<string, unknown>>)
+      : [];
+
+    const currentHalfTime = match.score?.halfTime ?? {};
+    const currentFullTime = match.score?.fullTime ?? {};
+    const htHome = asNumber(summaryHomeLines[0]?.value ?? summaryHomeLines[0]?.displayValue) ?? currentHalfTime.home ?? null;
+    const htAway = asNumber(summaryAwayLines[0]?.value ?? summaryAwayLines[0]?.displayValue) ?? currentHalfTime.away ?? null;
+    const ftHome = asNumber(summaryHome?.score) ?? currentFullTime.home ?? null;
+    const ftAway = asNumber(summaryAway?.score) ?? currentFullTime.away ?? null;
+    const winner = match.score?.winner ?? mapEspnWinner(ftHome, ftAway);
+    const incidents = await extractEspnIncidents(summary);
+
+    return {
+      ...match,
+      incidents,
+      score: {
+        ...(match.score ?? {}),
+        winner,
+        halfTime: { home: htHome, away: htAway },
+        fullTime: { home: ftHome, away: ftAway }
+      }
+    };
+  } catch {
+    return match;
+  }
+}
+
+async function enrichMatchesWithSummaryIfNeeded(
+  matches: Array<Record<string, unknown>>,
+  leagueKey: string
+) {
+  const enriched = await Promise.all(
+    matches.map(async (row) => {
+      const match = row as unknown as MatchApi;
+      const matchId = Number((row as Record<string, unknown>).id ?? 0);
+      const status = String((row as Record<string, unknown>).status ?? '');
+      const htHome = match.score?.halfTime?.home;
+      const htAway = match.score?.halfTime?.away;
+      const needsHalfTime = htHome === null || htHome === undefined || htAway === null || htAway === undefined;
+      if (!matchId || status !== 'FINISHED') {
+        return row;
+      }
+      if (!needsHalfTime && match.incidents) {
+        return row;
+      }
+      const next = await enrichMatchScoreFromSummary(match, leagueKey, matchId);
+      return next as unknown as Record<string, unknown>;
+    })
+  );
+  return enriched;
+}
+
+async function fetchEspnMatchesInRange(from: string, to: string) {
+  const ymdDates = enumerateDates(from, to);
+  const tasks: Array<Promise<Record<string, unknown>>> = [];
+  for (const leagueKey of ESPN_LEAGUES) {
+    for (const ymd of ymdDates) {
+      tasks.push(fetchEspnJson(`/apis/site/v2/sports/soccer/${leagueKey}/scoreboard?dates=${ymd}`, 10000));
+    }
+  }
+  const payloadsSettled = await Promise.allSettled(tasks);
+  const events: Array<{ event: Record<string, unknown>; league: Record<string, unknown> }> = [];
+  for (let i = 0; i < payloadsSettled.length; i += 1) {
+    const result = payloadsSettled[i];
+    if (result.status !== 'fulfilled') continue;
+    const payload = result.value;
+    const rows = Array.isArray(payload.events) ? (payload.events as Array<Record<string, unknown>>) : [];
+    const league = Array.isArray(payload.leagues) ? ((payload.leagues as Array<Record<string, unknown>>)[0] ?? {}) : {};
+    const leagueKey = ESPN_LEAGUES[Math.floor(i / Math.max(1, ymdDates.length))] ?? '';
+    for (const event of rows) {
+      events.push({ event: { ...event, __leagueKey: leagueKey }, league });
+    }
+  }
+  const seen = new Set<number>();
+  const matches: Array<Record<string, unknown>> = [];
+  for (const item of events) {
+    const normalized = normalizeEspnEvent(item.event, item.league, String(item.event.__leagueKey ?? ''));
+    if (!normalized.id || seen.has(normalized.id)) continue;
+    seen.add(normalized.id);
+    matches.push(normalized);
+  }
+  return matches;
+}
+
+async function fetchEspnLeagueMatchesInRange(league: string, from: string, to: string) {
+  const ymdDates = enumerateDates(from, to);
+  const tasks: Array<Promise<Record<string, unknown>>> = [];
+  for (const ymd of ymdDates) {
+    tasks.push(fetchEspnJson(`/apis/site/v2/sports/soccer/${league}/scoreboard?dates=${ymd}`, 10000));
+  }
+  const payloadsSettled = await Promise.allSettled(tasks);
+  const events: Array<{ event: Record<string, unknown>; league: Record<string, unknown> }> = [];
+  for (const result of payloadsSettled) {
+    if (result.status !== 'fulfilled') continue;
+    const payload = result.value;
+    const rows = Array.isArray(payload.events) ? (payload.events as Array<Record<string, unknown>>) : [];
+    const payloadLeague = Array.isArray(payload.leagues) ? ((payload.leagues as Array<Record<string, unknown>>)[0] ?? {}) : {};
+    for (const event of rows) {
+      events.push({ event: { ...event, __leagueKey: league }, league: payloadLeague });
+    }
+  }
+  const seen = new Set<number>();
+  const matches: Array<Record<string, unknown>> = [];
+  for (const item of events) {
+    const normalized = normalizeEspnEvent(item.event, item.league, String(item.event.__leagueKey ?? league));
+    if (!normalized.id || seen.has(normalized.id)) continue;
+    seen.add(normalized.id);
+    matches.push(normalized);
+  }
+  return matches;
+}
+
+function extractEspnStatValue(stats: Array<Record<string, unknown>>, names: string[], fallback = 0) {
+  for (const stat of stats) {
+    const key = String(
+      stat.name ?? stat.abbreviation ?? stat.shortDisplayName ?? stat.displayName ?? stat.type ?? ''
+    ).toLowerCase();
+    if (!names.includes(key)) continue;
+    const value = asNumber(stat.value ?? stat.displayValue ?? stat.rawValue);
+    if (value !== null) return value;
+  }
+  return fallback;
+}
+
+function normalizeEspnStandings(payload: Record<string, unknown>) {
+  const findEntries = (node: unknown, depth = 0): Array<Record<string, unknown>> => {
+    if (!node || typeof node !== 'object' || depth > 6) return [];
+    const obj = node as Record<string, unknown>;
+    if (Array.isArray(obj.entries)) {
+      return obj.entries as Array<Record<string, unknown>>;
+    }
+    for (const value of Object.values(obj)) {
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          const found = findEntries(item, depth + 1);
+          if (found.length > 0) return found;
+        }
+      } else if (value && typeof value === 'object') {
+        const found = findEntries(value, depth + 1);
+        if (found.length > 0) return found;
+      }
+    }
+    return [];
+  };
+  const entries = findEntries(payload);
+
+  const table = entries.map((entry, index) => {
+    const team = (entry.team ?? {}) as Record<string, unknown>;
+    const stats = Array.isArray(entry.stats) ? (entry.stats as Array<Record<string, unknown>>) : [];
+    const goalsFor = extractEspnStatValue(stats, ['goalsfor', 'gf']);
+    const goalsAgainst = extractEspnStatValue(stats, ['goalsagainst', 'ga']);
+    const goalDifference = extractEspnStatValue(stats, ['pointdifferential', 'differential', 'gd'], goalsFor - goalsAgainst);
+
+    return {
+      position: extractEspnStatValue(stats, ['rank', 'position'], index + 1),
+      team: {
+        id: asNumber(team.id) ?? index + 1,
+        name: String(team.displayName ?? team.name ?? 'Unknown Team'),
+        shortName: String(team.shortDisplayName ?? team.abbreviation ?? team.name ?? ''),
+        tla: String(team.abbreviation ?? '')
+      },
+      playedGames: extractEspnStatValue(stats, ['gamesplayed', 'gp', 'played']),
+      won: extractEspnStatValue(stats, ['wins', 'w']),
+      draw: extractEspnStatValue(stats, ['ties', 'draws', 'd']),
+      lost: extractEspnStatValue(stats, ['losses', 'l']),
+      points: extractEspnStatValue(stats, ['points', 'pts']),
+      goalsFor,
+      goalsAgainst,
+      goalDifference
+    };
+  });
+
+  return {
+    standings: [
+      {
+        type: 'TOTAL',
+        table
+      }
+    ]
+  };
+}
+
+function normalizeEspnTopScorers(payload: Record<string, unknown>, limit: number) {
+  const findLeaders = (node: unknown, depth = 0): Array<Record<string, unknown>> => {
+    if (!node || typeof node !== 'object' || depth > 6) return [];
+    const obj = node as Record<string, unknown>;
+    if (Array.isArray(obj.leaders)) {
+      return obj.leaders as Array<Record<string, unknown>>;
+    }
+    for (const value of Object.values(obj)) {
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          const found = findLeaders(item, depth + 1);
+          if (found.length > 0) return found;
+        }
+      } else if (value && typeof value === 'object') {
+        const found = findLeaders(value, depth + 1);
+        if (found.length > 0) return found;
+      }
+    }
+    return [];
+  };
+  const categories = Array.isArray(payload.categories) ? (payload.categories as Array<Record<string, unknown>>) : [];
+  const goalsCategory = categories.find((category) => String(category.name ?? '').toLowerCase().includes('goal')) ?? categories[0];
+  const leadersFromCategory = Array.isArray(goalsCategory?.leaders)
+    ? (goalsCategory?.leaders as Array<Record<string, unknown>>)
+    : [];
+  const leadersFromRoot = Array.isArray(payload.leaders) ? (payload.leaders as Array<Record<string, unknown>>) : [];
+  const leaders = leadersFromCategory.length > 0 ? leadersFromCategory : leadersFromRoot.length > 0 ? leadersFromRoot : findLeaders(payload);
+
+  const scorers = leaders.slice(0, Math.max(1, limit)).map((leader, index) => {
+    const athlete = (leader.athlete ?? {}) as Record<string, unknown>;
+    const team = (leader.team ?? {}) as Record<string, unknown>;
+    const statistics = Array.isArray(leader.statistics) ? (leader.statistics as Array<Record<string, unknown>>) : [];
+    const goals = asNumber(leader.value) ?? extractEspnStatValue(statistics, ['goals', 'g'], 0);
+    const assists = extractEspnStatValue(statistics, ['assists', 'a'], 0);
+    const penalties = extractEspnStatValue(statistics, ['penalties', 'pk'], 0);
+    const playedMatches = extractEspnStatValue(statistics, ['gamesplayed', 'gp', 'played'], 0);
+
+    return {
+      player: {
+        id: asNumber(athlete.id) ?? index + 1,
+        name: String(athlete.displayName ?? athlete.fullName ?? athlete.shortName ?? 'Unknown player')
+      },
+      team: {
+        id: asNumber(team.id) ?? null,
+        name: String(team.displayName ?? team.name ?? ''),
+        shortName: String(team.shortDisplayName ?? team.abbreviation ?? ''),
+        tla: String(team.abbreviation ?? '')
+      },
+      playedMatches,
+      goals,
+      assists,
+      penalties
+    };
+  });
+
+  return { scorers: scorers.filter((row) => (row.player?.name ?? '').trim().length > 0) };
+}
+
+async function fetchEspnStandingsWithSeasonFallback(espnLeague: string, seasonStart: string | null) {
+  const seasonNum = seasonStart ? Number(seasonStart) : Number.NaN;
+  const candidates: Array<string | null> = [];
+  if (Number.isFinite(seasonNum)) {
+    candidates.push(String(seasonNum), String(seasonNum + 1));
+  }
+  candidates.push(null);
+  const tried = new Set<string>();
+  for (const season of candidates) {
+    const key = season ?? 'none';
+    if (tried.has(key)) continue;
+    tried.add(key);
+    const seasonQuery = season ? `?season=${encodeURIComponent(season)}` : '';
+    const payload = await fetchEspnJson(`/apis/site/v2/sports/soccer/${espnLeague}/standings${seasonQuery}`, 90000);
+    const normalized = normalizeEspnStandings(payload);
+    if ((normalized.standings?.[0]?.table?.length ?? 0) > 0) {
+      return normalized;
+    }
+    try {
+      const fromRefs = await fetchEspnCoreStandingsFromRefs(payload);
+      if ((fromRefs.standings?.[0]?.table?.length ?? 0) > 0) {
+        return fromRefs;
+      }
+    } catch {
+      // Ignore and continue other fallbacks.
+    }
+    if (season) {
+      try {
+        const core = await fetchEspnCoreStandings(espnLeague, season);
+        if ((core.standings?.[0]?.table?.length ?? 0) > 0) {
+          return core;
+        }
+      } catch {
+        // Continue trying other season candidates.
+      }
+    }
+  }
+  return { standings: [{ type: 'TOTAL', table: [] }] };
+}
+
+async function fetchEspnScorersWithSeasonFallback(espnLeague: string, seasonStart: string | null, limit: number) {
+  const seasonNum = seasonStart ? Number(seasonStart) : Number.NaN;
+  const candidates: Array<string | null> = [];
+  if (Number.isFinite(seasonNum)) {
+    candidates.push(String(seasonNum), String(seasonNum + 1));
+  }
+  candidates.push(null);
+  const tried = new Set<string>();
+  for (const season of candidates) {
+    const key = season ?? 'none';
+    if (tried.has(key)) continue;
+    tried.add(key);
+    const seasonQuery = season ? `?season=${encodeURIComponent(season)}` : '';
+    const payload = await fetchEspnJson(`/apis/site/v2/sports/soccer/${espnLeague}/leaders${seasonQuery}`, 120000);
+    const normalized = normalizeEspnTopScorers(payload, limit);
+    if ((normalized.scorers?.length ?? 0) > 0) {
+      return normalized;
+    }
+    try {
+      const fromRefs = await fetchEspnCoreScorersFromRefs(payload, limit);
+      if ((fromRefs.scorers?.length ?? 0) > 0) {
+        return fromRefs;
+      }
+    } catch {
+      // Ignore and continue other fallbacks.
+    }
+    if (season) {
+      try {
+        const core = await fetchEspnCoreTopScorers(espnLeague, season, limit);
+        if ((core.scorers?.length ?? 0) > 0) {
+          return core;
+        }
+      } catch {
+        // Continue trying other season candidates.
+      }
+    }
+  }
+  return { scorers: [] };
+}
+
+async function fetchFootballDataJson(pathname: string, query: URLSearchParams) {
+  if (!footballDataApiKey) return null;
+  const url = new URL(pathname, footballDataApiBase);
+  for (const [key, value] of query.entries()) {
+    url.searchParams.set(key, value);
+  }
+  const response = await fetch(url, {
+    headers: {
+      'X-Auth-Token': footballDataApiKey,
+      Accept: 'application/json'
+    }
+  });
+  if (!response.ok) {
+    return null;
+  }
+  return (await response.json()) as Record<string, unknown>;
+}
+
+async function fetchFootballDataScorersWithFallback(competitionRef: string, season: string | null, limit: number) {
+  const attempts: URLSearchParams[] = [];
+
+  const primary = new URLSearchParams();
+  if (season) primary.set('season', season);
+  if (Number.isFinite(limit)) primary.set('limit', String(limit));
+  attempts.push(primary);
+
+  if (season) {
+    const noSeason = new URLSearchParams();
+    if (Number.isFinite(limit)) noSeason.set('limit', String(limit));
+    attempts.push(noSeason);
+
+    const seasonNum = Number(season);
+    if (Number.isFinite(seasonNum) && seasonNum > 1900) {
+      const previousSeason = new URLSearchParams();
+      previousSeason.set('season', String(seasonNum - 1));
+      if (Number.isFinite(limit)) previousSeason.set('limit', String(limit));
+      attempts.push(previousSeason);
+    }
+  }
+
+  let lastPayload: Record<string, unknown> | null = null;
+  for (const query of attempts) {
+    const payload = await fetchFootballDataJson(`/v4/competitions/${competitionRef}/scorers`, query);
+    if (!payload) continue;
+    lastPayload = payload;
+    const scorers = Array.isArray((payload as { scorers?: unknown }).scorers)
+      ? ((payload as { scorers?: unknown[] }).scorers ?? [])
+      : [];
+    if (scorers.length > 0) return payload;
+  }
+
+  return lastPayload;
+}
+
+function getFootballDataCompetitionRef(appCompetitionId: number): string {
+  const espnLeague = getEspnLeagueByFootballCompetitionId(appCompetitionId);
+  if (espnLeague && FOOTBALL_DATA_COMPETITION_CODE_BY_ESPN_LEAGUE[espnLeague]) {
+    return FOOTBALL_DATA_COMPETITION_CODE_BY_ESPN_LEAGUE[espnLeague];
+  }
+  return String(appCompetitionId);
+}
+
+function isFootballDataCompetitionSupported(appCompetitionId: number) {
+  const espnLeague = getEspnLeagueByFootballCompetitionId(appCompetitionId);
+  return Boolean(espnLeague && FOOTBALL_DATA_COMPETITION_CODE_BY_ESPN_LEAGUE[espnLeague]);
+}
+
+async function fetchEspnCoreStandings(espnLeague: string, season: string) {
+  const groupsPayload = await fetchEspnCoreJson(
+    `/v2/sports/soccer/leagues/${espnLeague}/seasons/${encodeURIComponent(season)}/types/1/groups`,
+    90000
+  );
+  const groupNodes = await resolveCoreCollection(groupsPayload.items ?? []);
+  const allEntries: Array<Record<string, unknown>> = [];
+  for (const groupNode of groupNodes) {
+    const ref = getRefFromNode(groupNode);
+    const groupIdMatch = (ref ?? '').match(/\/groups\/(\d+)/);
+    const groupId = groupIdMatch?.[1];
+    if (!groupId) continue;
+    const standingsPayload = await fetchEspnCoreJson(
+      `/v2/sports/soccer/leagues/${espnLeague}/seasons/${encodeURIComponent(season)}/types/1/groups/${groupId}/standings/0`,
+      90000
+    );
+    const entries = await resolveCoreCollection(
+      standingsPayload.entries ?? standingsPayload.items ?? standingsPayload.standings ?? []
+    );
+    allEntries.push(...entries);
+  }
+
+  const table = await mapCoreStandingsEntries(allEntries);
+
+  return {
+    standings: [
+      {
+        type: 'TOTAL',
+        table
+      }
+    ]
+  };
+}
+
+async function fetchEspnCoreTopScorers(espnLeague: string, season: string, limit: number) {
+  const leadersPayload = await fetchEspnCoreJson(
+    `/v2/sports/soccer/leagues/${espnLeague}/seasons/${encodeURIComponent(season)}/types/1/leaders`,
+    120000
+  );
+  const leaderItems = await resolveCoreCollection(leadersPayload.leaders ?? leadersPayload.items ?? []);
+  const scorers = await mapCoreScorersFromLeaderBuckets(leaderItems, limit);
+  return { scorers };
+}
+
+async function mapCoreStandingsEntries(entries: Array<Record<string, unknown>>) {
+  const collectStatsFromNodes = async (nodes: unknown[]) => {
+    const stats: Array<Record<string, unknown>> = [];
+    for (const node of nodes) {
+      const resolved = await resolveCoreObject(node);
+      if (!resolved) continue;
+      const direct = await resolveCoreCollection(resolved.stats);
+      if (direct.length > 0) {
+        stats.push(...direct);
+      }
+      const nestedRecords = await resolveCoreCollection(resolved.records ?? resolved.items);
+      for (const recordNode of nestedRecords) {
+        const recordResolved = await resolveCoreObject(recordNode);
+        if (!recordResolved) continue;
+        const recordStats = await resolveCoreCollection(recordResolved.stats);
+        if (recordStats.length > 0) {
+          stats.push(...recordStats);
+        }
+      }
+    }
+    return stats;
+  };
+
+  const table = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = await resolveCoreObject(entries[index]);
+    if (!entry) continue;
+    const team = await resolveCoreObject(entry.team);
+    const entryStats = await resolveCoreCollection(entry.stats);
+    const recordStats = await collectStatsFromNodes([entry.records]);
+    const teamRecord = team ? await resolveCoreObject(team.record) : null;
+    const teamRecordStats = await collectStatsFromNodes([teamRecord?.records, teamRecord?.items, teamRecord?.stats, team?.statistics]);
+    const teamStats = await collectStatsFromNodes([team?.statistics, team?.summary]);
+    const stats = [...entryStats, ...recordStats, ...teamRecordStats, ...teamStats];
+    const goalsFor = extractEspnStatValue(stats, ['goalsfor', 'gf', 'goals for', 'for']);
+    const goalsAgainst = extractEspnStatValue(stats, ['goalsagainst', 'ga', 'goals against', 'against']);
+    const goalDifference = extractEspnStatValue(stats, ['pointdifferential', 'differential', 'gd'], goalsFor - goalsAgainst);
+    table.push({
+      position: extractEspnStatValue(stats, ['rank', 'position'], index + 1),
+      team: {
+        id: asNumber(team?.id) ?? index + 1,
+        name: String(team?.displayName ?? team?.name ?? 'Unknown Team'),
+        shortName: String(team?.shortDisplayName ?? team?.abbreviation ?? team?.name ?? ''),
+        tla: String(team?.abbreviation ?? '')
+      },
+      playedGames: extractEspnStatValue(stats, ['gamesplayed', 'matchesplayed', 'played', 'gp', 'mp']),
+      won: extractEspnStatValue(stats, ['wins', 'w', 'win']),
+      draw: extractEspnStatValue(stats, ['ties', 'draws', 'd', 'draw']),
+      lost: extractEspnStatValue(stats, ['losses', 'l', 'loss']),
+      points: extractEspnStatValue(stats, ['points', 'pts', 'point']),
+      goalsFor,
+      goalsAgainst,
+      goalDifference
+    });
+  }
+  return table;
+}
+
+async function mapCoreScorersFromLeaderBuckets(leaderItems: Array<Record<string, unknown>>, limit: number) {
+  const scorers = [];
+  for (let index = 0; index < leaderItems.length && scorers.length < Math.max(1, limit); index += 1) {
+    const leader = await resolveCoreObject(leaderItems[index]);
+    if (!leader) continue;
+    const category = String(leader.name ?? leader.displayName ?? '').toLowerCase();
+    if (category && !category.includes('goal')) continue;
+    const leaders = await resolveCoreCollection(leader.leaders ?? leader.items ?? []);
+    for (let i = 0; i < leaders.length && scorers.length < Math.max(1, limit); i += 1) {
+      const item = await resolveCoreObject(leaders[i]);
+      if (!item) continue;
+      const athlete = await resolveCoreObject(item.athlete);
+      const team = await resolveCoreObject(item.team);
+      const stats = await resolveCoreCollection(item.statistics ?? item.stats ?? []);
+      const goals = asNumber(item.value) ?? extractEspnStatValue(stats, ['goals', 'g'], 0);
+      scorers.push({
+        player: {
+          id: asNumber(athlete?.id) ?? scorers.length + 1,
+          name: String(athlete?.displayName ?? athlete?.fullName ?? athlete?.shortName ?? 'Unknown player')
+        },
+        team: {
+          id: asNumber(team?.id) ?? null,
+          name: String(team?.displayName ?? team?.name ?? ''),
+          shortName: String(team?.shortDisplayName ?? team?.abbreviation ?? ''),
+          tla: String(team?.abbreviation ?? '')
+        },
+        playedMatches: extractEspnStatValue(stats, ['gamesplayed', 'gp', 'played'], 0),
+        goals,
+        assists: extractEspnStatValue(stats, ['assists', 'a'], 0),
+        penalties: extractEspnStatValue(stats, ['penalties', 'pk'], 0)
+      });
+    }
+  }
+  return scorers;
+}
+
+async function fetchEspnCoreStandingsFromRefs(sitePayload: Record<string, unknown>) {
+  const refs = new Set<string>();
+  collectRefs(sitePayload, refs);
+  const candidateRefs = Array.from(refs).filter((ref) => ref.includes('/standings/'));
+  for (const ref of candidateRefs) {
+    const payload = await fetchEspnCoreJson(ref, 90000);
+    const entries = await resolveCoreCollection(
+      (payload as Record<string, unknown>).entries ??
+        (payload as Record<string, unknown>).items ??
+        (payload as Record<string, unknown>).standings ??
+        []
+    );
+    if (entries.length === 0) continue;
+    const table = await mapCoreStandingsEntries(entries);
+    if (table.length > 0) {
+      return { standings: [{ type: 'TOTAL', table }] };
+    }
+  }
+  return { standings: [{ type: 'TOTAL', table: [] }] };
+}
+
+async function fetchEspnCoreScorersFromRefs(sitePayload: Record<string, unknown>, limit: number) {
+  const refs = new Set<string>();
+  collectRefs(sitePayload, refs);
+  const candidateRefs = Array.from(refs).filter((ref) => ref.includes('/leaders'));
+  for (const ref of candidateRefs) {
+    const payload = await fetchEspnCoreJson(ref, 120000);
+    const leaderItems = await resolveCoreCollection((payload as Record<string, unknown>).leaders ?? (payload as Record<string, unknown>).items ?? []);
+    const scorers = await mapCoreScorersFromLeaderBuckets(leaderItems, limit);
+    if (scorers.length > 0) {
+      return { scorers };
+    }
+  }
+  return { scorers: [] };
 }
 
 function requireSupabaseAdmin(res: express.Response) {
@@ -303,6 +1540,70 @@ function getWinner(home: number, away: number): 'HOME_TEAM' | 'AWAY_TEAM' | 'DRA
   return 'DRAW';
 }
 
+function normalizeNameForCompare(value: string) {
+  return value
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s'-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function sanitizePredictedPlayers(input: unknown, maxCount = 5) {
+  if (!Array.isArray(input)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of input) {
+    if (typeof raw !== 'string') continue;
+    const value = raw.trim().slice(0, 80);
+    if (!value) continue;
+    const normalized = normalizeNameForCompare(value);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(value);
+    if (out.length >= maxCount) break;
+  }
+  return out;
+}
+
+function hasAnyPlayerMatch(
+  predicted: string[],
+  incidents: Array<{ player?: string; team?: string }>,
+  match: MatchApi
+) {
+  if (!predicted.length || !incidents.length) return false;
+  const parsePredicted = (value: string) => {
+    if (value.startsWith('HOME::')) return { side: 'home' as const, name: value.slice('HOME::'.length) };
+    if (value.startsWith('AWAY::')) return { side: 'away' as const, name: value.slice('AWAY::'.length) };
+    return { side: null as 'home' | 'away' | null, name: value };
+  };
+  const homeTeamNormalized = normalizeNameForCompare(String(match.homeTeam?.name ?? ''));
+  const awayTeamNormalized = normalizeNameForCompare(String(match.awayTeam?.name ?? ''));
+  const actualRows = incidents
+    .map((item) => ({
+      player: normalizeNameForCompare(String(item.player ?? '')),
+      team: normalizeNameForCompare(String(item.team ?? ''))
+    }))
+    .filter((row) => row.player.length > 0);
+
+  for (const raw of predicted) {
+    const parsed = parsePredicted(String(raw ?? ''));
+    const targetPlayer = normalizeNameForCompare(parsed.name);
+    if (!targetPlayer) continue;
+    const found = actualRows.some((row) => {
+      if (row.player !== targetPlayer) return false;
+      if (parsed.side === 'home' && homeTeamNormalized && row.team && row.team !== homeTeamNormalized) return false;
+      if (parsed.side === 'away' && awayTeamNormalized && row.team && row.team !== awayTeamNormalized) return false;
+      return true;
+    });
+    if (found) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function getWeekStart(dateInput: string | Date) {
   const date = typeof dateInput === 'string' ? new Date(dateInput) : new Date(dateInput.getTime());
   const day = date.getUTCDay();
@@ -312,20 +1613,77 @@ function getWeekStart(dateInput: string | Date) {
   return date;
 }
 
-async function fetchMatchById(apiKey: string, matchId: number) {
-  const response = await fetch(new URL(`/v4/matches/${matchId}`, apiBase), {
-    headers: {
-      'X-Auth-Token': apiKey,
-      Accept: 'application/json'
+async function fetchMatchForCompetition(params: {
+  competitionId: number;
+  matchId: number;
+  matchDate?: string;
+}): Promise<MatchApi | null> {
+  const { competitionId, matchId, matchDate } = params;
+  const espnLeague = getEspnLeagueByFootballCompetitionId(competitionId);
+  if (!espnLeague) return null;
+  const cachedEvent = espnEventById.get(matchId);
+  if (cachedEvent) {
+    const normalized = normalizeEspnEvent(cachedEvent, undefined, espnLeague) as unknown as MatchApi;
+    const needsSummaryData =
+      normalized.status === 'FINISHED' &&
+      ((normalized.score?.halfTime?.home === null ||
+        normalized.score?.halfTime?.home === undefined ||
+        normalized.score?.halfTime?.away === null ||
+        normalized.score?.halfTime?.away === undefined) ||
+        !normalized.incidents);
+    if (needsSummaryData) {
+      return enrichMatchScoreFromSummary(normalized, espnLeague, matchId);
     }
-  });
-  updateFootballApiUsage(response.headers);
-  if (!response.ok) {
-    return null;
+    return normalized;
   }
 
-  const payload = (await response.json()) as MatchApiResponse;
-  return payload.match ?? payload;
+  if (matchDate) {
+    const matches = await fetchEspnLeagueMatchesInRange(espnLeague, matchDate, matchDate);
+    const found = matches.find((item) => Number((item as Record<string, unknown>).id ?? 0) === matchId);
+    if (found) {
+      const normalized = found as unknown as MatchApi;
+      const needsSummaryData =
+        normalized.status === 'FINISHED' &&
+        ((normalized.score?.halfTime?.home === null ||
+          normalized.score?.halfTime?.home === undefined ||
+          normalized.score?.halfTime?.away === null ||
+          normalized.score?.halfTime?.away === undefined) ||
+          !normalized.incidents);
+      if (needsSummaryData) {
+        return enrichMatchScoreFromSummary(normalized, espnLeague, matchId);
+      }
+      return normalized;
+    }
+  }
+
+  return null;
+}
+
+async function fetchCompetitionMatchesForDate(params: {
+  competitionId: number;
+  matchDate: string;
+}): Promise<
+  Array<{
+    id?: number;
+    competition?: { id?: number };
+    status?: string;
+    utcDate?: string;
+  }>
+> {
+  const { competitionId, matchDate } = params;
+  const espnLeague = getEspnLeagueByFootballCompetitionId(competitionId);
+  if (!espnLeague) {
+    return [];
+  }
+  const matches = await fetchEspnLeagueMatchesInRange(espnLeague, matchDate, matchDate);
+  return matches.map((row) => ({
+    id: Number((row as Record<string, unknown>).id ?? 0),
+    competition: {
+      id: Number(((row as Record<string, unknown>).competition as Record<string, unknown> | undefined)?.id ?? 0)
+    },
+    status: String((row as Record<string, unknown>).status ?? ''),
+    utcDate: String((row as Record<string, unknown>).utcDate ?? '')
+  }));
 }
 
 function calculatePointsForPrediction(params: {
@@ -334,6 +1692,9 @@ function calculatePointsForPrediction(params: {
     ft_away: number;
     ht_home: number;
     ht_away: number;
+    goal_players?: string[] | null;
+    yellow_card_players?: string[] | null;
+    red_card_players?: string[] | null;
   };
   match: MatchApi;
   bonusMultiplier: number;
@@ -363,8 +1724,24 @@ function calculatePointsForPrediction(params: {
   const ftPoints = params.prediction.ft_home === ftHome && params.prediction.ft_away === ftAway ? 1 : 0;
   const baseTotal = winnerPoints + htPoints + ftPoints;
   const perfectBonusPoints = baseTotal === 3 ? 2 : 0;
+  const goalEventBonus = hasAnyPlayerMatch(params.prediction.goal_players ?? [], params.match.incidents?.goals ?? [], params.match) ? 1 : 0;
+  const yellowEventBonus = hasAnyPlayerMatch(
+    params.prediction.yellow_card_players ?? [],
+    params.match.incidents?.yellowCards ?? [],
+    params.match
+  )
+    ? 1
+    : 0;
+  const redEventBonus = hasAnyPlayerMatch(
+    params.prediction.red_card_players ?? [],
+    params.match.incidents?.redCards ?? [],
+    params.match
+  )
+    ? 1
+    : 0;
+  const eventBonusPoints = goalEventBonus + yellowEventBonus + redEventBonus;
   const matchBonusPoints = Math.max(0, Math.round(baseTotal * (params.bonusMultiplier - 1)));
-  const bonusPoints = perfectBonusPoints + matchBonusPoints;
+  const bonusPoints = perfectBonusPoints + eventBonusPoints + matchBonusPoints;
   const totalPoints = baseTotal + bonusPoints;
 
   return {
@@ -401,29 +1778,6 @@ app.get('/internal/smtp-health', requireFirebaseAuth, async (req: AuthedRequest,
     smtpFrom: smtpFrom ? `${smtpFrom.slice(0, 2)}***` : '[missing]',
     lastVerifyAt: smtpLastVerifyAt,
     lastVerifyError: smtpLastVerifyError
-  });
-});
-
-app.get('/internal/api-usage', (_req, res) => {
-  res.status(200).json(footballApiUsageState);
-});
-
-app.get('/internal/api-usage/stream', (req, res) => {
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.flushHeaders();
-
-  footballApiUsageStreams.add(res);
-  res.write(`data: ${JSON.stringify(footballApiUsageState)}\n\n`);
-
-  const keepAliveId = setInterval(() => {
-    res.write(': keepalive\n\n');
-  }, 25000);
-
-  req.on('close', () => {
-    clearInterval(keepAliveId);
-    footballApiUsageStreams.delete(res);
   });
 });
 
@@ -1077,17 +2431,11 @@ app.get('/internal/db/groups/:groupId/leaderboard', requireFirebaseAuth, async (
     const membership = await requireGroupMember(req, res, groupId);
     if (!membership) return;
 
-    const apiKey = process.env.FOOTBALL_DATA_API_KEY;
-    if (!apiKey) {
-      res.status(500).json({ error: 'FOOTBALL_DATA_API_KEY is missing on the server.' });
-      return;
-    }
-
     const { data: group, error: groupError } = await admin
       .from('groups')
-      .select('bonus_enabled')
+      .select('bonus_enabled,competition_id')
       .eq('id', groupId)
-      .single<{ bonus_enabled: boolean }>();
+      .single<{ bonus_enabled: boolean; competition_id: number }>();
     if (groupError || !group) {
       throw new Error(groupError?.message ?? 'Group not found.');
     }
@@ -1120,7 +2468,12 @@ app.get('/internal/db/groups/:groupId/leaderboard', requireFirebaseAuth, async (
     const matchesById = new Map<number, MatchApi>();
     await Promise.all(
       matchIds.map(async (matchId) => {
-        const match = await fetchMatchById(apiKey, matchId);
+        const predictionForDate = (allPredictions ?? []).find((item) => item.match_id === matchId);
+        const match = await fetchMatchForCompetition({
+          competitionId: group.competition_id,
+          matchId,
+          matchDate: predictionForDate?.match_date
+        });
         if (match) matchesById.set(matchId, match);
       })
     );
@@ -1326,7 +2679,8 @@ app.post('/internal/db/predictions', requireFirebaseAuth, async (req: AuthedRequ
   const admin = requireSupabaseAdmin(res);
   if (!admin) return;
 
-  const { groupId, matchId, matchDate, htHome, htAway, ftHome, ftAway } = req.body as {
+  const { groupId, matchId, matchDate, htHome, htAway, ftHome, ftAway, goalPlayers, yellowCardPlayers, redCardPlayers } =
+    req.body as {
     groupId?: string;
     matchId?: number;
     matchDate?: string;
@@ -1334,6 +2688,9 @@ app.post('/internal/db/predictions', requireFirebaseAuth, async (req: AuthedRequ
     htAway?: number;
     ftHome?: number;
     ftAway?: number;
+    goalPlayers?: unknown;
+    yellowCardPlayers?: unknown;
+    redCardPlayers?: unknown;
   };
   const userUid = req.auth?.uid ?? '';
 
@@ -1342,6 +2699,10 @@ app.post('/internal/db/predictions', requireFirebaseAuth, async (req: AuthedRequ
     res.status(400).json({ error: 'Invalid prediction payload.' });
     return;
   }
+
+  const normalizedGoalPlayers = sanitizePredictedPlayers(goalPlayers);
+  const normalizedYellowCardPlayers = sanitizePredictedPlayers(yellowCardPlayers);
+  const normalizedRedCardPlayers = sanitizePredictedPlayers(redCardPlayers);
 
   try {
     const membership = await requireGroupMember(req, res, groupId);
@@ -1356,31 +2717,15 @@ app.post('/internal/db/predictions', requireFirebaseAuth, async (req: AuthedRequ
       throw new Error(groupError?.message ?? 'Group not found.');
     }
 
-    const apiKey = process.env.FOOTBALL_DATA_API_KEY;
-    if (!apiKey) {
-      res.status(500).json({ error: 'FOOTBALL_DATA_API_KEY is missing on the server.' });
-      return;
-    }
-
-    const matchResponse = await fetch(new URL(`/v4/matches/${matchId}`, apiBase), {
-      headers: {
-        'X-Auth-Token': apiKey,
-        Accept: 'application/json'
-      }
+    const competitionMatches = await fetchCompetitionMatchesForDate({
+      competitionId: group.competition_id,
+      matchDate
     });
-    updateFootballApiUsage(matchResponse.headers);
-    if (!matchResponse.ok) {
-      res.status(502).json({ error: 'Failed to validate match before saving prediction.' });
+    const matchData = competitionMatches.find((item) => item.id === matchId);
+    if (!matchData) {
+      res.status(400).json({ error: 'Match not found for this competition/date.' });
       return;
     }
-
-    const payload = (await matchResponse.json()) as {
-      match?: { competition?: { id?: number }; status?: string; utcDate?: string };
-      competition?: { id?: number };
-      status?: string;
-      utcDate?: string;
-    };
-    const matchData = payload.match ?? payload;
     const matchCompetitionId = matchData.competition?.id;
     const matchStatus = matchData.status ?? '';
     const kickoffAt = matchData.utcDate ? Date.parse(matchData.utcDate) : Number.NaN;
@@ -1410,7 +2755,10 @@ app.post('/internal/db/predictions', requireFirebaseAuth, async (req: AuthedRequ
         ht_home: htHome,
         ht_away: htAway,
         ft_home: ftHome,
-        ft_away: ftAway
+        ft_away: ftAway,
+        goal_players: normalizedGoalPlayers,
+        yellow_card_players: normalizedYellowCardPlayers,
+        red_card_players: normalizedRedCardPlayers
       },
       { onConflict: 'group_id,match_id,user_uid' }
     );
@@ -1513,32 +2861,212 @@ app.put('/internal/db/profile', requireFirebaseAuth, async (req: AuthedRequest, 
 });
 
 app.use('/api', async (req, res) => {
-  const apiKey = process.env.FOOTBALL_DATA_API_KEY;
-
-  if (!apiKey) {
-    res.status(500).json({ error: 'FOOTBALL_DATA_API_KEY is missing on the server.' });
-    return;
-  }
-
-  const upstreamPath = req.originalUrl.replace(/^\/api/, '');
-  const upstreamUrl = new URL(upstreamPath, apiBase);
-
   try {
-    const upstreamResponse = await fetch(upstreamUrl, {
-      method: req.method,
-      headers: {
-        'X-Auth-Token': apiKey,
-        Accept: 'application/json'
-      }
-    });
-    updateFootballApiUsage(upstreamResponse.headers);
+    const upstreamPath = req.originalUrl.replace(/^\/api/, '');
+    const upstreamUrl = new URL(upstreamPath, 'https://espn.local');
+    const pathname = upstreamUrl.pathname.toLowerCase();
+    const method = req.method.toUpperCase();
 
-    const contentType = upstreamResponse.headers.get('content-type');
-    if (contentType) {
-      res.setHeader('content-type', contentType);
+    if (method === 'GET' && pathname === '/v4/competitions') {
+      const competitions = ESPN_LEAGUES.map((leagueKey) => {
+        const comp = getEspnCompetitionByLeague(leagueKey);
+        if (!comp) return null;
+        return {
+          id: comp.id,
+          name: comp.name,
+          area: { name: comp.areaName },
+          footballDataSupported: isFootballDataCompetitionSupported(comp.id)
+        };
+      }).filter(
+        (row): row is { id: number; name: string; area: { name: string }; footballDataSupported: boolean } =>
+          row !== null
+      );
+      res.status(200).json({ competitions });
+      return;
     }
 
-    res.status(upstreamResponse.status).send(await upstreamResponse.text());
+    if (method === 'GET' && pathname.match(/^\/v4\/competitions\/\d+\/matches$/)) {
+      const match = pathname.match(/^\/v4\/competitions\/(\d+)\/matches$/);
+      const competitionId = Number(match?.[1] ?? Number.NaN);
+      const espnLeague = Number.isFinite(competitionId) ? getEspnLeagueByFootballCompetitionId(competitionId) : undefined;
+      const dateFrom = upstreamUrl.searchParams.get('dateFrom');
+      const dateTo = upstreamUrl.searchParams.get('dateTo');
+      if (!espnLeague) {
+        res.status(200).json({ matches: [] });
+        return;
+      }
+      if (!dateFrom || !dateTo) {
+        const today = new Date();
+        const y = today.getUTCFullYear();
+        const m = String(today.getUTCMonth() + 1).padStart(2, '0');
+        const d = String(today.getUTCDate()).padStart(2, '0');
+        const ymd = `${y}-${m}-${d}`;
+        const matches = await fetchEspnLeagueMatchesInRange(espnLeague, ymd, ymd);
+        const enriched = await enrichMatchesWithSummaryIfNeeded(matches, espnLeague);
+        res.status(200).json({ matches: enriched });
+        return;
+      }
+      const matches = await fetchEspnLeagueMatchesInRange(espnLeague, dateFrom, dateTo);
+      const enriched = await enrichMatchesWithSummaryIfNeeded(matches, espnLeague);
+      res.status(200).json({ matches: enriched });
+      return;
+    }
+
+    if (method === 'GET' && pathname === '/v4/matches') {
+      const dateFrom = upstreamUrl.searchParams.get('dateFrom');
+      const dateTo = upstreamUrl.searchParams.get('dateTo');
+      if (dateFrom && dateTo) {
+        const matches = await fetchEspnMatchesInRange(dateFrom, dateTo);
+        res.status(200).json({ matches });
+        return;
+      }
+    }
+
+    if (method === 'GET' && pathname.match(/^\/v4\/competitions\/\d+\/standings$/)) {
+      const match = pathname.match(/^\/v4\/competitions\/(\d+)\/standings$/);
+      const competitionId = Number(match?.[1] ?? Number.NaN);
+      const competitionRef = getFootballDataCompetitionRef(competitionId);
+      if (!footballDataApiKey) {
+        res.status(500).json({ error: 'FOOTBALL_DATA_API_KEY is missing on the server.' });
+        return;
+      }
+      const fdQuery = new URLSearchParams();
+      const season = upstreamUrl.searchParams.get('season');
+      const matchday = upstreamUrl.searchParams.get('matchday');
+      if (season) fdQuery.set('season', season);
+      if (matchday) fdQuery.set('matchday', matchday);
+
+      const footballDataPayload = await fetchFootballDataJson(`/v4/competitions/${competitionRef}/standings`, fdQuery);
+      if (footballDataPayload && Array.isArray((footballDataPayload as { standings?: unknown }).standings)) {
+        res.status(200).json(footballDataPayload);
+        return;
+      }
+      res.status(502).json({ error: 'Failed to load standings from football-data for this competition/season.' });
+      return;
+    }
+
+    if (method === 'GET' && pathname.match(/^\/v4\/competitions\/\d+\/scorers$/)) {
+      const match = pathname.match(/^\/v4\/competitions\/(\d+)\/scorers$/);
+      const competitionId = Number(match?.[1] ?? Number.NaN);
+      const competitionRef = getFootballDataCompetitionRef(competitionId);
+      if (!footballDataApiKey) {
+        res.status(500).json({ error: 'FOOTBALL_DATA_API_KEY is missing on the server.' });
+        return;
+      }
+      const fdQuery = new URLSearchParams();
+      const season = upstreamUrl.searchParams.get('season');
+      const limit = Number(upstreamUrl.searchParams.get('limit') ?? 10);
+      if (season) fdQuery.set('season', season);
+      if (Number.isFinite(limit)) fdQuery.set('limit', String(limit));
+
+      const footballDataPayload = await fetchFootballDataScorersWithFallback(
+        competitionRef,
+        season,
+        Number.isFinite(limit) ? limit : 10
+      );
+      if (footballDataPayload && Array.isArray((footballDataPayload as { scorers?: unknown }).scorers)) {
+        res.status(200).json(footballDataPayload);
+        return;
+      }
+      res.status(502).json({ error: 'Failed to load scorers from football-data for this competition/season.' });
+      return;
+    }
+
+    if (method === 'GET' && pathname.startsWith('/v4/matches/')) {
+      const idPart = pathname.replace('/v4/matches/', '').split('/')[0];
+      const matchId = Number(idPart);
+      if (Number.isFinite(matchId) && espnEventById.has(matchId)) {
+        const event = espnEventById.get(matchId) as Record<string, unknown>;
+        const leagueKey = espnLeagueByEventId.get(matchId) ?? '';
+        const match = normalizeEspnEvent(event, undefined, leagueKey);
+        if (leagueKey) {
+          try {
+            const summary = await fetchEspnJson(`/apis/site/v2/sports/soccer/${leagueKey}/summary?event=${matchId}`, 12000);
+            const summaryCompetition = Array.isArray((summary.header as Record<string, unknown> | undefined)?.competitions)
+              ? (((summary.header as Record<string, unknown>).competitions as Array<Record<string, unknown>>)[0] ?? null)
+              : null;
+            const summaryCompetitors = Array.isArray(summaryCompetition?.competitors)
+              ? (summaryCompetition?.competitors as Array<Record<string, unknown>>)
+              : [];
+            const summaryHome = summaryCompetitors.find(
+              (item) => String((item.homeAway as string | undefined) ?? '').toLowerCase() === 'home'
+            );
+            const summaryAway = summaryCompetitors.find(
+              (item) => String((item.homeAway as string | undefined) ?? '').toLowerCase() === 'away'
+            );
+            const summaryHomeLines = Array.isArray(summaryHome?.linescores)
+              ? (summaryHome?.linescores as Array<Record<string, unknown>>)
+              : [];
+            const summaryAwayLines = Array.isArray(summaryAway?.linescores)
+              ? (summaryAway?.linescores as Array<Record<string, unknown>>)
+              : [];
+            const summaryHtHome = asNumber(summaryHomeLines[0]?.value ?? summaryHomeLines[0]?.displayValue);
+            const summaryHtAway = asNumber(summaryAwayLines[0]?.value ?? summaryAwayLines[0]?.displayValue);
+            if (summaryHtHome !== null && summaryHtAway !== null) {
+              (match as Record<string, unknown>).score = {
+                ...(match.score as Record<string, unknown>),
+                halfTime: { home: summaryHtHome, away: summaryHtAway }
+              };
+            }
+            const summaryFtHome = asNumber(summaryHome?.score);
+            const summaryFtAway = asNumber(summaryAway?.score);
+            if (summaryFtHome !== null && summaryFtAway !== null) {
+              (match as Record<string, unknown>).score = {
+                ...(match.score as Record<string, unknown>),
+                winner: mapEspnWinner(summaryFtHome, summaryFtAway),
+                fullTime: { home: summaryFtHome, away: summaryFtAway }
+              };
+            }
+            const incidents = await extractEspnIncidents(summary);
+            (match as Record<string, unknown>).incidents = incidents;
+          } catch {
+            // Keep basic match payload if summary endpoint fails.
+          }
+        }
+        res.status(200).json({ match });
+        return;
+      }
+    }
+
+    if (method === 'GET' && pathname.startsWith('/v4/teams/')) {
+      const idPart = pathname.replace('/v4/teams/', '').split('/')[0];
+      const teamId = Number(idPart);
+      if (Number.isFinite(teamId)) {
+        const team = (espnTeamById.get(teamId) ?? {}) as Record<string, unknown>;
+        const leagueHint = espnLeagueByTeamId.get(teamId);
+        const leaguesToTry = leagueHint ? [leagueHint] : ESPN_LEAGUES;
+        let squad: CoreTeamAthlete[] = [];
+        for (const league of leaguesToTry) {
+          try {
+            squad = await fetchSiteTeamSquad(league, teamId);
+            if (squad.length === 0) {
+              squad = await fetchCoreTeamSquad(league, teamId);
+            }
+          } catch {
+            squad = [];
+          }
+          if (squad.length > 0) break;
+        }
+        res.status(200).json({
+          team: {
+            id: asNumber(team.id) ?? teamId,
+            name: String(team.displayName ?? team.shortDisplayName ?? 'Team'),
+            shortName: String(team.shortDisplayName ?? team.abbreviation ?? ''),
+            tla: String(team.abbreviation ?? ''),
+            crest: pickEspnLogoUrl(team),
+            nickname: String(team.nickname ?? ''),
+            color: String(team.color ?? ''),
+            alternateColor: String(team.alternateColor ?? ''),
+            form: String(team.form ?? ''),
+            venue: String((team.venue as Record<string, unknown> | undefined)?.fullName ?? ''),
+            squad
+          }
+        });
+        return;
+      }
+    }
+
+    res.status(404).json({ error: 'Unsupported API route for ESPN-only mode.' });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Proxy request failed.';
     res.status(502).json({ error: message });

@@ -50,6 +50,7 @@ type Competition = {
   id: number;
   name: string;
   area?: { name?: string };
+  footballDataSupported?: boolean;
 };
 
 type Team = {
@@ -59,6 +60,10 @@ type Team = {
   tla?: string;
   crest?: string;
   venue?: string;
+  nickname?: string;
+  color?: string;
+  alternateColor?: string;
+  form?: string;
   founded?: number;
   coach?: { name?: string; nationality?: string };
 };
@@ -67,6 +72,13 @@ type Score = {
   winner?: 'HOME_TEAM' | 'AWAY_TEAM' | 'DRAW' | null;
   halfTime?: { home?: number | null; away?: number | null };
   fullTime?: { home?: number | null; away?: number | null };
+};
+
+type MatchIncident = {
+  minute?: string;
+  team?: string;
+  player?: string;
+  text?: string;
 };
 
 type Match = {
@@ -83,6 +95,11 @@ type Match = {
   stage?: string;
   group?: string | null;
   referees?: Array<{ id?: number; name?: string; type?: string; nationality?: string }>;
+  incidents?: {
+    goals?: MatchIncident[];
+    yellowCards?: MatchIncident[];
+    redCards?: MatchIncident[];
+  };
 };
 
 type CompetitionResponse = {
@@ -95,7 +112,7 @@ type MatchListResponse = {
 
 type StandingRow = {
   position: number;
-  team: { id: number; name: string; shortName?: string; tla?: string };
+  team: { id: number; name: string; shortName?: string; tla?: string; crest?: string };
   playedGames: number;
   won: number;
   draw: number;
@@ -115,7 +132,7 @@ type StandingsResponse = {
 
 type TopScorer = {
   player?: { id?: number; name?: string };
-  team?: { id?: number; name?: string; shortName?: string; tla?: string };
+  team?: { id?: number; name?: string; shortName?: string; tla?: string; crest?: string };
   playedMatches?: number;
   goals?: number;
   assists?: number;
@@ -143,6 +160,12 @@ type PredictionDraft = {
   htAway: string;
   ftHome: string;
   ftAway: string;
+  goalPlayersHome: string;
+  goalPlayersAway: string;
+  yellowCardPlayersHome: string;
+  yellowCardPlayersAway: string;
+  redCardPlayersHome: string;
+  redCardPlayersAway: string;
 };
 
 type ProfileForm = {
@@ -162,12 +185,6 @@ type ResponsiblePlayForm = {
 };
 
 type AppPage = 'home' | 'game' | 'profile';
-type ApiUsage = {
-  remainingMinute: number | null;
-  limitMinute: number | null;
-  resetInSeconds: number | null;
-  updatedAt: string | null;
-};
 
 const statuses: Array<{ label: string; value: StatusFilter }> = [
   { label: 'All', value: '' },
@@ -175,6 +192,17 @@ const statuses: Array<{ label: string; value: StatusFilter }> = [
   { label: 'Scheduled', value: 'SCHEDULED' },
   { label: 'Finished', value: 'FINISHED' }
 ];
+
+const LIVE_MATCH_STATUSES = new Set([
+  'LIVE',
+  'IN_PLAY',
+  'PAUSED',
+  'HALF_TIME',
+  'EXTRA_TIME',
+  'PENALTY_SHOOTOUT',
+  'SUSPENDED'
+]);
+
 
 function getPageFromHash(hash: string): AppPage {
   if (hash === '#/game') return 'game';
@@ -194,6 +222,15 @@ function formatSeasonLabel(startYear: string) {
   return `${start}/${end} (${shortStart}/${shortEnd})`;
 }
 
+function pickDefaultCompetitionId(competitions: Competition[]) {
+  const preferredOrder = [2021, 2014, 2019, 2002, 2015, 2001];
+  for (const id of preferredOrder) {
+    const found = competitions.find((competition) => competition.id === id);
+    if (found) return String(found.id);
+  }
+  return competitions[0] ? String(competitions[0].id) : '';
+}
+
 function getCurrentSeasonStartYear(now: Date = new Date()) {
   const year = now.getFullYear();
   const month = now.getMonth();
@@ -207,6 +244,80 @@ function formatCountdown(ms: number) {
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function parsePlayersInput(value: string) {
+  return Array.from(
+    new Set(
+      value
+        .split(',')
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0)
+        .slice(0, 5)
+    )
+  );
+}
+
+const HOME_PICK_PREFIX = 'HOME::';
+const AWAY_PICK_PREFIX = 'AWAY::';
+
+function encodeTeamPlayerPicks(homeCsv: string, awayCsv: string) {
+  const home = parsePlayersInput(homeCsv).map((name) => `${HOME_PICK_PREFIX}${name}`);
+  const away = parsePlayersInput(awayCsv).map((name) => `${AWAY_PICK_PREFIX}${name}`);
+  return [...home, ...away];
+}
+
+function splitTeamPlayerPicks(picks: string[] | undefined) {
+  const home: string[] = [];
+  const away: string[] = [];
+  for (const raw of picks ?? []) {
+    const value = String(raw ?? '').trim();
+    if (!value) continue;
+    if (value.startsWith(HOME_PICK_PREFIX)) {
+      home.push(value.slice(HOME_PICK_PREFIX.length));
+      continue;
+    }
+    if (value.startsWith(AWAY_PICK_PREFIX)) {
+      away.push(value.slice(AWAY_PICK_PREFIX.length));
+      continue;
+    }
+    home.push(value);
+  }
+  return {
+    home: home.join(', '),
+    away: away.join(', ')
+  };
+}
+
+function normalizePlayerToken(value: string) {
+  return value
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s'-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function incidentPlayersForTeam(incidents: MatchIncident[] | undefined, team: Team) {
+  if (!incidents?.length) return [] as string[];
+  const candidates = [team.name, team.shortName, team.tla]
+    .map((value) => normalizePlayerToken(String(value ?? '')))
+    .filter(Boolean);
+  const matchesTeam = (incidentTeam: string) => {
+    const normalizedIncidentTeam = normalizePlayerToken(incidentTeam);
+    if (!normalizedIncidentTeam) return true;
+    return candidates.some(
+      (candidate) =>
+        normalizedIncidentTeam === candidate ||
+        normalizedIncidentTeam.includes(candidate) ||
+        candidate.includes(normalizedIncidentTeam)
+    );
+  };
+  return incidents
+    .filter((item) => matchesTeam(String(item.team ?? '')))
+    .map((item) => String(item.player ?? '').trim())
+    .filter(Boolean);
 }
 
 function colorFromText(input: string, saturation = 70, lightness = 48) {
@@ -355,6 +466,99 @@ function ImportantMatchCard({ match, onOpen }: { match: Match; onOpen: (match: M
   );
 }
 
+function PlayerPicksInput({
+  label,
+  title,
+  value,
+  options,
+  actualPlayers,
+  showResultState = false,
+  disabled,
+  onChange,
+  compact = false
+}: {
+  label: string;
+  title: string;
+  value: string;
+  options: string[];
+  actualPlayers?: string[];
+  showResultState?: boolean;
+  disabled: boolean;
+  onChange: (next: string) => void;
+  compact?: boolean;
+}) {
+  const [selected, setSelected] = useState('');
+  const picks = useMemo(() => parsePlayersInput(value), [value]);
+  const available = useMemo(
+    () => options.filter((name) => !picks.some((pick) => pick.toLowerCase() === name.toLowerCase())),
+    [options, picks]
+  );
+  const actualSet = useMemo(
+    () => new Set((actualPlayers ?? []).map((name) => normalizePlayerToken(String(name ?? ''))).filter(Boolean)),
+    [actualPlayers]
+  );
+
+  const addSelected = () => {
+    if (disabled) return;
+    const candidate = selected.trim();
+    if (!candidate) return;
+    const next = parsePlayersInput([...picks, candidate].join(', '));
+    onChange(next.join(', '));
+    setSelected('');
+  };
+
+  const removePick = (item: string) => {
+    if (disabled) return;
+    const next = picks.filter((pick) => pick !== item);
+    onChange(next.join(', '));
+  };
+
+  return (
+    <div className={`player-picks ${compact ? 'player-picks-compact' : ''}`}>
+      {!compact ? (
+        <span className="player-picks-head" title={title} aria-label={title}>
+          {label}
+        </span>
+      ) : null}
+      <div className={`player-picks-box ${disabled ? 'player-picks-box-disabled' : ''}`}>
+        {!disabled ? (
+          <div className="player-picker-actions">
+            <select value={selected} onChange={(e) => setSelected(e.target.value)} aria-label={title}>
+              <option value="">{available.length > 0 ? 'Select player' : 'No players available'}</option>
+              {available.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+            <button type="button" className="details-btn" disabled={!selected} onClick={addSelected}>
+              Add
+            </button>
+          </div>
+        ) : null}
+        <div className="player-picks-chips">
+          {picks.length === 0 && !compact ? <span className="player-picks-empty">No players selected</span> : null}
+          {picks.map((pick) => (
+            <span
+              key={pick}
+              className={`player-pick-chip ${
+                showResultState ? (actualSet.has(normalizePlayerToken(pick)) ? 'player-pick-chip-hit' : 'player-pick-chip-miss') : ''
+              }`}
+            >
+              {pick}
+              {!disabled ? (
+                <button type="button" onClick={() => removePick(pick)} aria-label={`Remove ${pick}`}>
+                  ×
+                </button>
+              ) : null}
+            </span>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const today = useMemo(() => getTodayLocalDateInputValue(), []);
   const [page, setPage] = useState<AppPage>(() => getPageFromHash(window.location.hash));
@@ -396,7 +600,6 @@ function App() {
   });
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
-  const [apiUsage, setApiUsage] = useState<ApiUsage | null>(null);
 
   const [competitions, setCompetitions] = useState<Competition[]>([]);
   const [publicMatches, setPublicMatches] = useState<Match[]>([]);
@@ -448,7 +651,9 @@ function App() {
   const [savingAll, setSavingAll] = useState(false);
   const [groupMatchesLoading, setGroupMatchesLoading] = useState(false);
   const [perfectCongratsMatch, setPerfectCongratsMatch] = useState<string | null>(null);
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const shownPerfectCongratsRef = useRef<Set<string>>(new Set());
+  const profileMenuRef = useRef<HTMLDivElement | null>(null);
 
   const selectedGroup = useMemo(
     () => groups.find((group) => group.id === selectedGroupId) ?? null,
@@ -518,6 +723,11 @@ function App() {
     const currentSeasonStart = getCurrentSeasonStartYear();
     return Array.from({ length: 12 }, (_, index) => String(currentSeasonStart - index));
   }, []);
+  const footballDataCompetitions = useMemo(
+    () => competitions.filter((competition) => competition.footballDataSupported),
+    [competitions]
+  );
+  const standingsCompetitions = useMemo(() => footballDataCompetitions, [footballDataCompetitions]);
 
   const groupLeaderboard = groupLeaderboardData?.leaderboard ?? [];
   const freeGroupLimit = 1;
@@ -557,10 +767,14 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!standingsCompetitionId && competitions.length > 0) {
-      setStandingsCompetitionId(String(competitions[0].id));
+    if (!standingsCompetitionId && standingsCompetitions.length > 0) {
+      setStandingsCompetitionId(String(standingsCompetitions[0].id));
+      return;
     }
-  }, [competitions, standingsCompetitionId]);
+    if (standingsCompetitionId && !standingsCompetitions.some((competition) => String(competition.id) === standingsCompetitionId)) {
+      setStandingsCompetitionId(standingsCompetitions[0] ? String(standingsCompetitions[0].id) : '');
+    }
+  }, [standingsCompetitionId, standingsCompetitions]);
 
   useEffect(() => {
     void loadPublicMatches();
@@ -584,6 +798,7 @@ function App() {
       setSelectedGroupId('');
       setProfileRecord(null);
       setBillingStatus(null);
+      setProfileMenuOpen(false);
       setProfileForm({
         firstName: '',
         lastName: '',
@@ -664,6 +879,18 @@ function App() {
   }, [user]);
 
   useEffect(() => {
+    if (!profileMenuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (profileMenuRef.current?.contains(target)) return;
+      setProfileMenuOpen(false);
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => window.removeEventListener('pointerdown', onPointerDown);
+  }, [profileMenuOpen]);
+
+  useEffect(() => {
     if (!user || !selectedGroup) {
       setGroupMatches([]);
       setMyPredictions({});
@@ -689,6 +916,33 @@ function App() {
   }, [leaderboardScope, selectedGroup?.id]);
 
   useEffect(() => {
+    if (page !== 'game' || !selectedGroup || !user) return;
+
+    const tick = () => {
+      if (document.visibilityState !== 'visible') return;
+      void refreshGroupMatchesOnly(selectedGroup);
+      void refreshGroupRealtimeData(selectedGroup, user.uid, leaderboardScope);
+    };
+
+    tick();
+
+    const intervalId = window.setInterval(() => {
+      tick();
+    }, 15000);
+
+    const onVisibilityChange = () => tick();
+    const onFocus = () => tick();
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('focus', onFocus);
+
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [page, selectedGroup, user, today, leaderboardScope]);
+
+  useEffect(() => {
     if (!selectedGroup || !user) return;
     for (const match of groupMatches) {
       const mine = myPredictions[match.id];
@@ -705,62 +959,42 @@ function App() {
   }, [groupMatches, myPredictions, selectedGroup, user]);
 
   useEffect(() => {
-    let mounted = true;
-    let source: EventSource | null = null;
+    if (groupMatches.length === 0) return;
+    const teamIds = Array.from(
+      new Set(
+        groupMatches
+          .flatMap((match) => [match.homeTeam.id, match.awayTeam.id])
+          .filter((id): id is number => typeof id === 'number')
+      )
+    );
+    const missingTeamIds = teamIds.filter((teamId) => !teamDetailsById[teamId]);
+    if (missingTeamIds.length === 0) return;
 
-    const loadApiUsage = async () => {
+    let cancelled = false;
+    const load = async () => {
       try {
-        const response = await fetch('/internal/api-usage');
-        if (!response.ok) return;
-        const payload = (await response.json()) as ApiUsage;
-        if (mounted) {
-          setApiUsage(payload);
+        setTeamDetailsLoading(true);
+        const entries = await Promise.all(
+          missingTeamIds.map(async (teamId) => {
+            const teamDetails = await loadTeamById(teamId);
+            return [teamId, teamDetails] as const;
+          })
+        );
+        if (cancelled) return;
+        const nextMap: Record<number, TeamDetails> = {};
+        for (const [teamId, teamDetails] of entries) {
+          if (teamDetails) nextMap[teamId] = teamDetails;
         }
-      } catch {
-        // Ignore usage badge refresh errors.
+        setTeamDetailsById((prev) => ({ ...prev, ...nextMap }));
+      } finally {
+        if (!cancelled) setTeamDetailsLoading(false);
       }
     };
-
-    void loadApiUsage();
-    try {
-      source = new EventSource('/internal/api-usage/stream');
-      source.onmessage = (event) => {
-        if (!mounted) return;
-        try {
-          const payload = JSON.parse(event.data) as ApiUsage;
-          setApiUsage(payload);
-        } catch {
-          // Ignore malformed stream payloads.
-        }
-      };
-      source.onerror = () => {
-        // Stream may reconnect automatically; keep fallback polling active.
-      };
-    } catch {
-      // Ignore EventSource setup errors; polling fallback stays active.
-    }
-
-    const id = window.setInterval(() => {
-      void loadApiUsage();
-    }, 5000);
-
+    void load();
     return () => {
-      mounted = false;
-      source?.close();
-      window.clearInterval(id);
+      cancelled = true;
     };
-  }, []);
-
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      setApiUsage((prev) => {
-        if (!prev || prev.resetInSeconds === null || prev.resetInSeconds <= 0) return prev;
-        return { ...prev, resetInSeconds: prev.resetInSeconds - 1 };
-      });
-    }, 1000);
-
-    return () => window.clearInterval(id);
-  }, []);
+  }, [groupMatches, teamDetailsById]);
 
   async function loadCompetitions() {
     try {
@@ -770,7 +1004,15 @@ function App() {
       }
 
       const payload = (await response.json()) as CompetitionResponse;
-      setCompetitions((payload.competitions ?? []).sort((a, b) => a.name.localeCompare(b.name)));
+      const sorted = (payload.competitions ?? []).sort((a, b) => a.name.localeCompare(b.name));
+      setCompetitions(sorted);
+      const supported = sorted.filter((competition) => competition.footballDataSupported);
+      setStandingsCompetitionId((prev) => {
+        if (prev && supported.some((competition) => String(competition.id) === prev)) {
+          return prev;
+        }
+        return pickDefaultCompetitionId(supported);
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch competitions.');
     }
@@ -989,7 +1231,7 @@ function App() {
 
   async function loadMatchesForCompetition(competitionId: number, targetDate: string) {
     const query = new URLSearchParams({ dateFrom: targetDate, dateTo: targetDate });
-    const response = await fetch(`/api/v4/competitions/${competitionId}/matches?${query.toString()}`);
+    const response = await fetch(`/api/v4/competitions/${competitionId}/matches?${query.toString()}`, { cache: 'no-store' });
     if (!response.ok) {
       throw new Error('Failed to fetch today matches.');
     }
@@ -999,7 +1241,7 @@ function App() {
   }
 
   async function loadMatchById(matchId: number) {
-    const response = await fetch(`/api/v4/matches/${matchId}`);
+    const response = await fetch(`/api/v4/matches/${matchId}`, { cache: 'no-store' });
     if (!response.ok) {
       return null;
     }
@@ -1184,11 +1426,20 @@ function App() {
       const nextDrafts: Record<number, PredictionDraft> = {};
       for (const match of matchRows) {
         const prediction = mineMap[match.id];
+        const goalSplit = splitTeamPlayerPicks(prediction?.goal_players);
+        const yellowSplit = splitTeamPlayerPicks(prediction?.yellow_card_players);
+        const redSplit = splitTeamPlayerPicks(prediction?.red_card_players);
         nextDrafts[match.id] = {
           htHome: prediction ? String(prediction.ht_home) : '',
           htAway: prediction ? String(prediction.ht_away) : '',
           ftHome: prediction ? String(prediction.ft_home) : '',
-          ftAway: prediction ? String(prediction.ft_away) : ''
+          ftAway: prediction ? String(prediction.ft_away) : '',
+          goalPlayersHome: goalSplit.home,
+          goalPlayersAway: goalSplit.away,
+          yellowCardPlayersHome: yellowSplit.home,
+          yellowCardPlayersAway: yellowSplit.away,
+          redCardPlayersHome: redSplit.home,
+          redCardPlayersAway: redSplit.away
         };
       }
       setPredictionDrafts(nextDrafts);
@@ -1197,6 +1448,60 @@ function App() {
       setError(err instanceof Error ? err.message : 'Failed to load group data.');
     } finally {
       setGroupMatchesLoading(false);
+    }
+  }
+
+  async function refreshGroupMatchesOnly(group: AppGroup) {
+    try {
+      const latestMatches = await loadMatchesForCompetition(group.competition_id, today);
+      const liveMatches = latestMatches.filter((match) => LIVE_MATCH_STATUSES.has(String(match.status ?? '').toUpperCase()));
+      if (liveMatches.length === 0) {
+        setGroupMatches(latestMatches);
+        return;
+      }
+
+      const detailedEntries = await Promise.all(
+        liveMatches.map(async (match) => {
+          const details = await loadMatchById(match.id);
+          return [match.id, details] as const;
+        })
+      );
+      const detailsById = new Map<number, Match>();
+      for (const [matchId, details] of detailedEntries) {
+        if (details) detailsById.set(matchId, details);
+      }
+      setGroupMatches(latestMatches.map((match) => detailsById.get(match.id) ?? match));
+    } catch {
+      // Ignore background refresh failures and keep current UI state.
+    }
+  }
+
+  async function refreshGroupRealtimeData(group: AppGroup, userUid: string, scope: 'total' | 'weekly') {
+    try {
+      const [predictionRows, leaderboardData, inviteRows] = await Promise.all([
+        loadPredictionsForGroup({ groupId: group.id, matchDate: today }),
+        loadGroupLeaderboard({
+          groupId: group.id,
+          scope,
+          referenceDate: `${today}T00:00:00.000Z`
+        }),
+        loadInvitesForGroup(group.id)
+      ]);
+
+      const mine = predictionRows.filter((row) => row.user_uid === userUid);
+      const mineMap = Object.fromEntries(mine.map((row) => [row.match_id, row]));
+      setMyPredictions(mineMap);
+
+      const byMatch: Record<number, MatchPrediction[]> = {};
+      for (const row of predictionRows) {
+        byMatch[row.match_id] = byMatch[row.match_id] ?? [];
+        byMatch[row.match_id].push(row);
+      }
+      setGroupPredictionsByMatch(byMatch);
+      setGroupLeaderboardData(leaderboardData);
+      setInvites(inviteRows);
+    } catch {
+      // Ignore transient polling failures.
     }
   }
 
@@ -1429,6 +1734,9 @@ function App() {
       htAway: number;
       ftHome: number;
       ftAway: number;
+      goalPlayers: string[];
+      yellowCardPlayers: string[];
+      redCardPlayers: string[];
     }> = [];
     let lockedMatches = 0;
 
@@ -1460,7 +1768,10 @@ function App() {
         htHome: numeric[0],
         htAway: numeric[1],
         ftHome: numeric[2],
-        ftAway: numeric[3]
+        ftAway: numeric[3],
+        goalPlayers: encodeTeamPlayerPicks(draft.goalPlayersHome, draft.goalPlayersAway),
+        yellowCardPlayers: encodeTeamPlayerPicks(draft.yellowCardPlayersHome, draft.yellowCardPlayersAway),
+        redCardPlayers: encodeTeamPlayerPicks(draft.redCardPlayersHome, draft.redCardPlayersAway)
       });
     }
 
@@ -1537,8 +1848,9 @@ function App() {
   const headerContextLabel =
     page === 'home' ? 'Home Matches' : page === 'game' ? 'Game' : user ? 'Your Profile' : 'Profile';
   const isGroupOwner = Boolean(user && selectedGroup && selectedGroup.owner_uid === user.uid);
-  const apiUsageKnown = apiUsage?.remainingMinute !== null && apiUsage?.remainingMinute !== undefined;
-  const apiUsageLow = apiUsageKnown && (apiUsage?.remainingMinute ?? 0) <= 2;
+  const profileDisplayName =
+    profileRecord?.display_name?.trim() || user?.displayName?.trim() || user?.email?.split('@')[0] || 'User';
+  const profileInitial = profileDisplayName.charAt(0).toUpperCase();
 
   return (
     <div className="app">
@@ -1569,22 +1881,53 @@ function App() {
             >
               Game
             </button>
-            <button
-              type="button"
-              className={`chip ${page === 'profile' ? 'chip-active' : ''}`}
-              onClick={() => goToPage('profile')}
-            >
-              Profile
-            </button>
           </nav>
 
           <div className="topbar-action">
-            <span className="topbar-context">{user ? user.email : 'Guest mode'}</span>
             {user ? (
-              <button type="button" className="details-btn" onClick={() => void handleLogout()}>
-                Logout
-              </button>
-            ) : null}
+              <div className="profile-menu-wrap" ref={profileMenuRef}>
+                <button
+                  type="button"
+                  className="profile-menu-trigger"
+                  aria-haspopup="menu"
+                  aria-expanded={profileMenuOpen}
+                  onClick={() => setProfileMenuOpen((prev) => !prev)}
+                >
+                  <span className="profile-avatar" aria-hidden="true">
+                    {profileInitial}
+                  </span>
+                  <span className="topbar-context">{profileDisplayName}</span>
+                </button>
+                {profileMenuOpen ? (
+                  <div className="profile-menu-dropdown" role="menu" aria-label="User menu">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="profile-menu-item"
+                      onClick={() => {
+                        setProfileMenuOpen(false);
+                        goToPage('profile');
+                      }}
+                    >
+                      User info
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="profile-menu-item profile-menu-item-danger"
+                      onClick={() => {
+                        setProfileMenuOpen(false);
+                        void handleLogout();
+                      }}
+                    >
+                      Logout
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <span className="topbar-context">Guest mode</span>
+            )}
           </div>
         </div>
       </header>
@@ -1641,7 +1984,7 @@ function App() {
                     Competition
                     <select value={publicCompetitionId} onChange={(e) => setPublicCompetitionId(e.target.value)}>
                       <option value="">All competitions</option>
-                      {competitions.map((competition) => (
+                      {footballDataCompetitions.map((competition) => (
                         <option key={competition.id} value={competition.id}>
                           {competition.name} ({competition.area?.name ?? 'Unknown'})
                         </option>
@@ -1665,7 +2008,15 @@ function App() {
                 </div>
               </section>
 
-              <section className="filter-panel important-panel">
+              <section
+                className="filter-panel important-panel"
+                style={
+                  {
+                    '--left-accent': importantMatch ? getTeamAccentColor(importantMatch.homeTeam) : '#2f8f6b',
+                    '--right-accent': importantMatch ? getTeamAccentColor(importantMatch.awayTeam) : '#2c5f9f'
+                  } as CSSProperties
+                }
+              >
                 {!importantMatch ? <p className="muted">No live/upcoming important match.</p> : null}
                 {importantMatch ? (
                   <ImportantMatchCard match={importantMatch} onOpen={openMatchDetails} />
@@ -1690,9 +2041,10 @@ function App() {
                     </header>
                     <div className="match-list">
                       {group.matches.map((match) => (
+                        // Use a composite key to avoid row/logo reuse if provider IDs collide across competitions.
                         <div
                           className="match-row match-row-clickable"
-                          key={match.id}
+                          key={`${match.id}-${match.utcDate}-${match.homeTeam.name}-${match.awayTeam.name}-${match.competition?.name ?? ''}`}
                           role="button"
                           tabIndex={0}
                           onClick={() => void openMatchDetails(match)}
@@ -1749,8 +2101,8 @@ function App() {
                   <label>
                     Competition
                     <select value={standingsCompetitionId} onChange={(e) => setStandingsCompetitionId(e.target.value)}>
-                      <option value="">Select competition</option>
-                      {competitions.map((competition) => (
+                      <option value="">Select competition (ESPN-supported)</option>
+                      {standingsCompetitions.map((competition) => (
                         <option key={competition.id} value={competition.id}>
                           {competition.name} ({competition.area?.name ?? 'Unknown'})
                         </option>
@@ -1781,6 +2133,9 @@ function App() {
                 {!standingsCompetitionId ? (
                   <p className="muted">Select a competition to view standings.</p>
                 ) : null}
+                {standingsCompetitionId && standingsCompetitions.length === 0 ? (
+                  <p className="muted">No football-data-supported competitions loaded yet.</p>
+                ) : null}
                 {standingsCompetitionId && standingsLoading ? <p className="muted">Loading standings...</p> : null}
                 {standingsCompetitionId && !standingsLoading && standings.length === 0 ? (
                   <p className="muted">No standings available for this competition and season.</p>
@@ -1806,7 +2161,14 @@ function App() {
                         {standings.map((row) => (
                           <tr key={row.team.id}>
                             <td>{row.position}</td>
-                            <td>{row.team.shortName ?? row.team.name}</td>
+                            <td>
+                              <span className="standings-team-cell">
+                                {row.team.crest ? (
+                                  <img className="table-team-crest" src={row.team.crest} alt="" loading="lazy" />
+                                ) : null}
+                                <span>{row.team.shortName ?? row.team.name}</span>
+                              </span>
+                            </td>
                             <td>{row.playedGames}</td>
                             <td>{row.won}</td>
                             <td>{row.draw}</td>
@@ -1855,8 +2217,11 @@ function App() {
                           <span className="scorer-rank">#{index + 1}</span>
                           <div className="scorer-meta">
                             <strong>{scorer.player?.name ?? 'Unknown player'}</strong>
-                            <span>
-                              {scorer.team?.shortName ?? scorer.team?.name ?? 'Unknown team'}
+                            <span className="scorer-team-line">
+                              {scorer.team?.crest ? (
+                                <img className="table-team-crest" src={scorer.team.crest} alt="" loading="lazy" />
+                              ) : null}
+                              <span>{scorer.team?.shortName ?? scorer.team?.name ?? 'Unknown team'}</span>
                               {typeof scorer.assists === 'number' ? ` | ${scorer.assists} assists` : ''}
                             </span>
                           </div>
@@ -2255,8 +2620,11 @@ function App() {
                   <p>Winner correct: <strong>+1</strong></p>
                   <p>Half-time exact score: <strong>+1</strong></p>
                   <p>Full-time exact score: <strong>+1</strong></p>
+                  <p>Goal player pick hit (optional): <strong>+1</strong></p>
+                  <p>Yellow-card player pick hit (optional): <strong>+1</strong></p>
+                  <p>Red-card player pick hit (optional): <strong>+1</strong></p>
                   <p>Perfect prediction (winner + HT + FT all correct): <strong>+2 bonus</strong></p>
-                  <p className="muted">Max normal score per match: 5 pts (group bonus multipliers can increase it).</p>
+                  <p className="muted">Max normal score per match: 8 pts (group bonus multipliers can increase it).</p>
                 </div>
               </section>
             </div>
@@ -2293,74 +2661,62 @@ function App() {
                   </div>
 
                   {groupMatches.map((match) => {
-                    const draft = predictionDrafts[match.id] ?? { htHome: '', htAway: '', ftHome: '', ftAway: '' };
+                    const draft = predictionDrafts[match.id] ?? {
+                      htHome: '',
+                      htAway: '',
+                      ftHome: '',
+                      ftAway: '',
+                      goalPlayersHome: '',
+                      goalPlayersAway: '',
+                      yellowCardPlayersHome: '',
+                      yellowCardPlayersAway: '',
+                      redCardPlayersHome: '',
+                      redCardPlayersAway: ''
+                    };
                     const saved = myPredictions[match.id];
                     const matchPredictions = groupPredictionsByMatch[match.id] ?? [];
                     const isOpenForPrediction = isMatchOpenForPrediction(match, selectedGroup.prediction_lock_minutes);
-                    const shouldReveal = isMatchStarted(match);
+                    const shouldReveal = !isOpenForPrediction;
                     const memberEmailByUid = Object.fromEntries(groupMembers.map((member) => [member.user_uid, member.email]));
-                    const matchResult = getMatchResult(match);
+                    const realFtHome = match.score?.fullTime?.home ?? '-';
+                    const realFtAway = match.score?.fullTime?.away ?? '-';
                     const matchLabel = `${match.homeTeam.name} vs ${match.awayTeam.name}`;
+                    const savedGoalSplit = splitTeamPlayerPicks(saved?.goal_players);
+                    const savedYellowSplit = splitTeamPlayerPicks(saved?.yellow_card_players);
+                    const savedRedSplit = splitTeamPlayerPicks(saved?.red_card_players);
+                    const showEventResultState = match.status === 'FINISHED';
+                    const goalPlayersHomeActual = incidentPlayersForTeam(match.incidents?.goals, match.homeTeam);
+                    const goalPlayersAwayActual = incidentPlayersForTeam(match.incidents?.goals, match.awayTeam);
+                    const yellowPlayersHomeActual = incidentPlayersForTeam(match.incidents?.yellowCards, match.homeTeam);
+                    const yellowPlayersAwayActual = incidentPlayersForTeam(match.incidents?.yellowCards, match.awayTeam);
+                    const redPlayersHomeActual = incidentPlayersForTeam(match.incidents?.redCards, match.homeTeam);
+                    const redPlayersAwayActual = incidentPlayersForTeam(match.incidents?.redCards, match.awayTeam);
+                    const homePlayers =
+                      match.homeTeam.id !== undefined ? teamDetailsById[match.homeTeam.id]?.squad?.map((p) => p.name ?? '').filter(Boolean) ?? [] : [];
+                    const awayPlayers =
+                      match.awayTeam.id !== undefined ? teamDetailsById[match.awayTeam.id]?.squad?.map((p) => p.name ?? '').filter(Boolean) ?? [] : [];
 
                     return (
                       <article className="league-card prediction-card" key={match.id}>
-                        <div className="match-row prediction-row">
+                        <div className="prediction-head prediction-head-modern">
                           <div className="match-time">
                             <span className={`status-dot ${getStatusClass(match.status)}`} />
                             <span>{match.status === 'TIMED' ? kickoffTime(match.utcDate) : match.status}</span>
                           </div>
+                          <span className="prediction-kickoff">{formatMatchDateTime(match.utcDate)}</span>
+                        </div>
 
-                          <div className="teams-col">
-                            <div className="team-line">
-                              <span className="team-name-wrap">
-                                {match.homeTeam.crest ? <img className="team-crest" src={match.homeTeam.crest} alt="" loading="lazy" /> : null}
-                                <span className="team-name">{match.homeTeam.name}</span>
-                              </span>
-                              <strong className="team-score">{match.score?.fullTime?.home ?? '-'}</strong>
-                            </div>
-                            <div className="team-line">
-                              <span className="team-name-wrap">
-                                {match.awayTeam.crest ? <img className="team-crest" src={match.awayTeam.crest} alt="" loading="lazy" /> : null}
-                                <span className="team-name">{match.awayTeam.name}</span>
-                              </span>
-                              <strong className="team-score">{match.score?.fullTime?.away ?? '-'}</strong>
-                            </div>
-                          </div>
+                        <div className="prediction-scoreboard">
+                          <section className="prediction-team-side">
+                            <span className="team-name-wrap">
+                              {match.homeTeam.crest ? <img className="team-crest" src={match.homeTeam.crest} alt="" loading="lazy" /> : null}
+                              <span className="team-name">{match.homeTeam.name}</span>
+                            </span>
+                          </section>
 
-                          <div className="prediction-inputs">
-                            <label>
-                              HT
-                              <div className="inline-score">
-                                <input
-                                  type="number"
-                                  min={0}
-                                  value={draft.htHome}
-                                  disabled={!isOpenForPrediction}
-                                  onChange={(e) =>
-                                    setPredictionDrafts((prev) => ({
-                                      ...prev,
-                                      [match.id]: { ...draft, htHome: e.target.value }
-                                    }))
-                                  }
-                                />
-                                <span>-</span>
-                                <input
-                                  type="number"
-                                  min={0}
-                                  value={draft.htAway}
-                                  disabled={!isOpenForPrediction}
-                                  onChange={(e) =>
-                                    setPredictionDrafts((prev) => ({
-                                      ...prev,
-                                      [match.id]: { ...draft, htAway: e.target.value }
-                                    }))
-                                  }
-                                />
-                              </div>
-                            </label>
-
-                            <label>
-                              FT
+                          <section className="prediction-score-core">
+                            <label className="prediction-score-row">
+                              <span className="prediction-score-tag">FT</span>
                               <div className="inline-score">
                                 <input
                                   type="number"
@@ -2389,6 +2745,185 @@ function App() {
                                 />
                               </div>
                             </label>
+
+                            <label className="prediction-score-row">
+                              <span className="prediction-score-tag">HT</span>
+                              <div className="inline-score">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  value={draft.htHome}
+                                  disabled={!isOpenForPrediction}
+                                  onChange={(e) =>
+                                    setPredictionDrafts((prev) => ({
+                                      ...prev,
+                                      [match.id]: { ...draft, htHome: e.target.value }
+                                    }))
+                                  }
+                                />
+                                <span>-</span>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  value={draft.htAway}
+                                  disabled={!isOpenForPrediction}
+                                  onChange={(e) =>
+                                    setPredictionDrafts((prev) => ({
+                                      ...prev,
+                                      [match.id]: { ...draft, htAway: e.target.value }
+                                    }))
+                                  }
+                                />
+                              </div>
+                            </label>
+                            <p className="prediction-real-result">{realFtHome}-{realFtAway}</p>
+                          </section>
+
+                          <section className="prediction-team-side prediction-team-side-away">
+                            <span className="team-name-wrap">
+                              {match.awayTeam.crest ? <img className="team-crest" src={match.awayTeam.crest} alt="" loading="lazy" /> : null}
+                              <span className="team-name">{match.awayTeam.name}</span>
+                            </span>
+                          </section>
+                        </div>
+
+                        <div className="prediction-events-board">
+                          <div className="prediction-events-head">
+                            <span />
+                            <strong>{match.homeTeam.tla ?? match.homeTeam.name}</strong>
+                            <strong>{match.awayTeam.tla ?? match.awayTeam.name}</strong>
+                          </div>
+
+                          <div className="prediction-event-row">
+                            <span className="prediction-event-marker" title="Goal">
+                              ⚽
+                            </span>
+                            <div className="prediction-event-cell">
+                              <span className="prediction-event-team-tag">{match.homeTeam.tla ?? 'HOME'}</span>
+                              <PlayerPicksInput
+                                compact
+                                label="⚽"
+                              title={`${match.homeTeam.name} goal players`}
+                              value={draft.goalPlayersHome}
+                              options={homePlayers}
+                              actualPlayers={goalPlayersHomeActual}
+                              showResultState={showEventResultState}
+                              disabled={!isOpenForPrediction}
+                              onChange={(next) =>
+                                setPredictionDrafts((prev) => ({
+                                    ...prev,
+                                    [match.id]: { ...draft, goalPlayersHome: next }
+                                  }))
+                                }
+                              />
+                            </div>
+                            <div className="prediction-event-cell">
+                              <span className="prediction-event-team-tag">{match.awayTeam.tla ?? 'AWAY'}</span>
+                              <PlayerPicksInput
+                                compact
+                                label="⚽"
+                              title={`${match.awayTeam.name} goal players`}
+                              value={draft.goalPlayersAway}
+                              options={awayPlayers}
+                              actualPlayers={goalPlayersAwayActual}
+                              showResultState={showEventResultState}
+                              disabled={!isOpenForPrediction}
+                              onChange={(next) =>
+                                setPredictionDrafts((prev) => ({
+                                    ...prev,
+                                    [match.id]: { ...draft, goalPlayersAway: next }
+                                  }))
+                                }
+                              />
+                            </div>
+                          </div>
+
+                          <div className="prediction-event-row">
+                            <span className="prediction-event-marker" title="Yellow Card">
+                              🟨
+                            </span>
+                            <div className="prediction-event-cell">
+                              <span className="prediction-event-team-tag">{match.homeTeam.tla ?? 'HOME'}</span>
+                              <PlayerPicksInput
+                                compact
+                                label="🟨"
+                              title={`${match.homeTeam.name} yellow card players`}
+                              value={draft.yellowCardPlayersHome}
+                              options={homePlayers}
+                              actualPlayers={yellowPlayersHomeActual}
+                              showResultState={showEventResultState}
+                              disabled={!isOpenForPrediction}
+                              onChange={(next) =>
+                                setPredictionDrafts((prev) => ({
+                                    ...prev,
+                                    [match.id]: { ...draft, yellowCardPlayersHome: next }
+                                  }))
+                                }
+                              />
+                            </div>
+                            <div className="prediction-event-cell">
+                              <span className="prediction-event-team-tag">{match.awayTeam.tla ?? 'AWAY'}</span>
+                              <PlayerPicksInput
+                                compact
+                                label="🟨"
+                              title={`${match.awayTeam.name} yellow card players`}
+                              value={draft.yellowCardPlayersAway}
+                              options={awayPlayers}
+                              actualPlayers={yellowPlayersAwayActual}
+                              showResultState={showEventResultState}
+                              disabled={!isOpenForPrediction}
+                              onChange={(next) =>
+                                setPredictionDrafts((prev) => ({
+                                    ...prev,
+                                    [match.id]: { ...draft, yellowCardPlayersAway: next }
+                                  }))
+                                }
+                              />
+                            </div>
+                          </div>
+
+                          <div className="prediction-event-row">
+                            <span className="prediction-event-marker" title="Red Card">
+                              🟥
+                            </span>
+                            <div className="prediction-event-cell">
+                              <span className="prediction-event-team-tag">{match.homeTeam.tla ?? 'HOME'}</span>
+                              <PlayerPicksInput
+                                compact
+                                label="🟥"
+                              title={`${match.homeTeam.name} red card players`}
+                              value={draft.redCardPlayersHome}
+                              options={homePlayers}
+                              actualPlayers={redPlayersHomeActual}
+                              showResultState={showEventResultState}
+                              disabled={!isOpenForPrediction}
+                              onChange={(next) =>
+                                setPredictionDrafts((prev) => ({
+                                    ...prev,
+                                    [match.id]: { ...draft, redCardPlayersHome: next }
+                                  }))
+                                }
+                              />
+                            </div>
+                            <div className="prediction-event-cell">
+                              <span className="prediction-event-team-tag">{match.awayTeam.tla ?? 'AWAY'}</span>
+                              <PlayerPicksInput
+                                compact
+                                label="🟥"
+                              title={`${match.awayTeam.name} red card players`}
+                              value={draft.redCardPlayersAway}
+                              options={awayPlayers}
+                              actualPlayers={redPlayersAwayActual}
+                              showResultState={showEventResultState}
+                              disabled={!isOpenForPrediction}
+                              onChange={(next) =>
+                                setPredictionDrafts((prev) => ({
+                                    ...prev,
+                                    [match.id]: { ...draft, redCardPlayersAway: next }
+                                  }))
+                                }
+                              />
+                            </div>
                           </div>
                         </div>
                         {saved ? (
@@ -2396,19 +2931,32 @@ function App() {
                             Saved: HT {saved.ht_home}-{saved.ht_away} | FT {saved.ft_home}-{saved.ft_away}
                           </p>
                         ) : null}
+                        {saved?.goal_players?.length ? (
+                          <p className="saved-line">
+                            Goal picks: {match.homeTeam.tla ?? 'Home'} [{savedGoalSplit.home || '-'}] | {match.awayTeam.tla ?? 'Away'} [{savedGoalSplit.away || '-'}]
+                          </p>
+                        ) : null}
+                        {saved?.yellow_card_players?.length ? (
+                          <p className="saved-line">
+                            Yellow picks: {match.homeTeam.tla ?? 'Home'} [{savedYellowSplit.home || '-'}] | {match.awayTeam.tla ?? 'Away'} [{savedYellowSplit.away || '-'}]
+                          </p>
+                        ) : null}
+                        {saved?.red_card_players?.length ? (
+                          <p className="saved-line">
+                            Red picks: {match.homeTeam.tla ?? 'Home'} [{savedRedSplit.home || '-'}] | {match.awayTeam.tla ?? 'Away'} [{savedRedSplit.away || '-'}]
+                          </p>
+                        ) : null}
                         {!isOpenForPrediction ? <p className="saved-line">Predictions locked for this match.</p> : null}
                         {saved && !shouldReveal ? (
-                          <p className="saved-line">Predictions are private until kickoff starts.</p>
-                        ) : null}
-                        {matchResult ? (
-                          <p className="saved-line">
-                            Result: HT {matchResult.htHome}-{matchResult.htAway} | FT {matchResult.ftHome}-{matchResult.ftAway}
-                          </p>
+                          <p className="saved-line">Predictions are private until lock time.</p>
                         ) : null}
                         {shouldReveal ? (
                           <div className="reveal-list">
                             {matchPredictions.map((item) => {
                               const points = calculatePredictionPoints(match, item);
+                              const itemGoalSplit = splitTeamPlayerPicks(item.goal_players);
+                              const itemYellowSplit = splitTeamPlayerPicks(item.yellow_card_players);
+                              const itemRedSplit = splitTeamPlayerPicks(item.red_card_players);
                               return (
                                 <article className="reveal-card" key={item.id}>
                                   <div className="reveal-card-head">
@@ -2423,6 +2971,21 @@ function App() {
                                     <p>
                                       <strong>FT:</strong> {item.ft_home} - {item.ft_away}
                                     </p>
+                                    {item.goal_players?.length ? (
+                                      <p>
+                                        <strong>Goal:</strong> {match.homeTeam.tla ?? 'Home'} [{itemGoalSplit.home || '-'}] | {match.awayTeam.tla ?? 'Away'} [{itemGoalSplit.away || '-'}]
+                                      </p>
+                                    ) : null}
+                                    {item.yellow_card_players?.length ? (
+                                      <p>
+                                        <strong>Yellow:</strong> {match.homeTeam.tla ?? 'Home'} [{itemYellowSplit.home || '-'}] | {match.awayTeam.tla ?? 'Away'} [{itemYellowSplit.away || '-'}]
+                                      </p>
+                                    ) : null}
+                                    {item.red_card_players?.length ? (
+                                      <p>
+                                        <strong>Red:</strong> {match.homeTeam.tla ?? 'Home'} [{itemRedSplit.home || '-'}] | {match.awayTeam.tla ?? 'Away'} [{itemRedSplit.away || '-'}]
+                                      </p>
+                                    ) : null}
                                   </div>
                                 </article>
                               );
@@ -2679,8 +3242,27 @@ function App() {
                                   <strong>{activeMatchDetails.homeTeam.name}</strong>
                                 </span>
                               </p>
-                              <p className="muted">Coach: {homeDetails?.coach?.name ?? activeMatchDetails.homeTeam.coach?.name ?? 'N/A'}</p>
-                              {homePlayers.length === 0 ? <p className="muted">No squad data available.</p> : null}
+                              <p className="muted">Short: {homeDetails?.tla ?? activeMatchDetails.homeTeam.tla ?? 'N/A'}</p>
+                              <p className="muted">Nickname: {homeDetails?.nickname ?? activeMatchDetails.homeTeam.nickname ?? 'N/A'}</p>
+                              <p className="muted">Form: {homeDetails?.form ?? activeMatchDetails.homeTeam.form ?? 'N/A'}</p>
+                              <p className="muted">Venue: {homeDetails?.venue ?? activeMatchDetails.homeTeam.venue ?? 'N/A'}</p>
+                              {(homeDetails?.color ?? activeMatchDetails.homeTeam.color) ? (
+                                <p className="muted">
+                                  Primary Color:{' '}
+                                  <span
+                                    style={{
+                                      display: 'inline-block',
+                                      width: 14,
+                                      height: 14,
+                                      borderRadius: 999,
+                                      verticalAlign: 'middle',
+                                      marginLeft: 6,
+                                      border: '1px solid rgba(255,255,255,0.25)',
+                                      background: `#${homeDetails?.color ?? activeMatchDetails.homeTeam.color}`
+                                    }}
+                                  />
+                                </p>
+                              ) : null}
                               {homePlayers.length > 0 ? <HalfFieldPlayers players={homePlayers} side="home" /> : null}
                             </>
                           );
@@ -2707,8 +3289,27 @@ function App() {
                                   <strong>{activeMatchDetails.awayTeam.name}</strong>
                                 </span>
                               </p>
-                              <p className="muted">Coach: {awayDetails?.coach?.name ?? activeMatchDetails.awayTeam.coach?.name ?? 'N/A'}</p>
-                              {awayPlayers.length === 0 ? <p className="muted">No squad data available.</p> : null}
+                              <p className="muted">Short: {awayDetails?.tla ?? activeMatchDetails.awayTeam.tla ?? 'N/A'}</p>
+                              <p className="muted">Nickname: {awayDetails?.nickname ?? activeMatchDetails.awayTeam.nickname ?? 'N/A'}</p>
+                              <p className="muted">Form: {awayDetails?.form ?? activeMatchDetails.awayTeam.form ?? 'N/A'}</p>
+                              <p className="muted">Venue: {awayDetails?.venue ?? activeMatchDetails.awayTeam.venue ?? 'N/A'}</p>
+                              {(awayDetails?.color ?? activeMatchDetails.awayTeam.color) ? (
+                                <p className="muted">
+                                  Primary Color:{' '}
+                                  <span
+                                    style={{
+                                      display: 'inline-block',
+                                      width: 14,
+                                      height: 14,
+                                      borderRadius: 999,
+                                      verticalAlign: 'middle',
+                                      marginLeft: 6,
+                                      border: '1px solid rgba(255,255,255,0.25)',
+                                      background: `#${awayDetails?.color ?? activeMatchDetails.awayTeam.color}`
+                                    }}
+                                  />
+                                </p>
+                              ) : null}
                               {awayPlayers.length > 0 ? <HalfFieldPlayers players={awayPlayers} side="away" /> : null}
                             </>
                           );
@@ -2738,6 +3339,62 @@ function App() {
                         : 'N/A'}
                     </p>
                   </div>
+
+                  <div className="events-grid">
+                    <article className="league-card">
+                      <header className="league-head">
+                        <h4>Goals</h4>
+                      </header>
+                      <div className="filter-panel">
+                        {(activeMatchDetails.incidents?.goals ?? []).length === 0 ? (
+                          <p className="muted">No goals data.</p>
+                        ) : (
+                          (activeMatchDetails.incidents?.goals ?? []).map((item, index) => (
+                            <p key={`goal-${index}`}>
+                              <strong>{item.minute || '--'}</strong> {item.player || item.text || 'Goal'}{' '}
+                              <span className="muted">({item.team || 'Unknown'})</span>
+                            </p>
+                          ))
+                        )}
+                      </div>
+                    </article>
+
+                    <article className="league-card">
+                      <header className="league-head">
+                        <h4>Yellow Cards</h4>
+                      </header>
+                      <div className="filter-panel">
+                        {(activeMatchDetails.incidents?.yellowCards ?? []).length === 0 ? (
+                          <p className="muted">No yellow cards data.</p>
+                        ) : (
+                          (activeMatchDetails.incidents?.yellowCards ?? []).map((item, index) => (
+                            <p key={`yellow-${index}`}>
+                              <strong>{item.minute || '--'}</strong> {item.player || item.text || 'Yellow card'}{' '}
+                              <span className="muted">({item.team || 'Unknown'})</span>
+                            </p>
+                          ))
+                        )}
+                      </div>
+                    </article>
+
+                    <article className="league-card">
+                      <header className="league-head">
+                        <h4>Red Cards</h4>
+                      </header>
+                      <div className="filter-panel">
+                        {(activeMatchDetails.incidents?.redCards ?? []).length === 0 ? (
+                          <p className="muted">No red cards data.</p>
+                        ) : (
+                          (activeMatchDetails.incidents?.redCards ?? []).map((item, index) => (
+                            <p key={`red-${index}`}>
+                              <strong>{item.minute || '--'}</strong> {item.player || item.text || 'Red card'}{' '}
+                              <span className="muted">({item.team || 'Unknown'})</span>
+                            </p>
+                          ))
+                        )}
+                      </div>
+                    </article>
+                  </div>
                 </>
               ) : null}
             </section>
@@ -2764,17 +3421,6 @@ function App() {
         {message ? <p className="muted">{message}</p> : null}
         {busy ? <p className="muted">Working...</p> : null}
       </main>
-      <div className={`api-usage-badge ${apiUsageLow ? 'api-usage-badge-low' : ''}`}>
-        <strong>API Calls</strong>
-        <span>
-          {apiUsageKnown
-            ? `${apiUsage?.remainingMinute} left${apiUsage?.limitMinute ? ` / ${apiUsage.limitMinute}` : ''}`
-            : 'Waiting first API call...'}
-        </span>
-        {apiUsage?.resetInSeconds !== null && apiUsage?.resetInSeconds !== undefined ? (
-          <span>reset in {Math.max(0, apiUsage.resetInSeconds)}s</span>
-        ) : null}
-      </div>
       <footer className="app-footer">
         <div className="app-footer-inner">
           <p>Copyright © {new Date().getFullYear()} PredictLeague. All rights reserved.</p>
@@ -2871,6 +3517,9 @@ type PredictionPoints = {
   winner: number;
   ht: number;
   ft: number;
+  goalEvent: number;
+  yellowEvent: number;
+  redEvent: number;
   total: number;
 };
 
@@ -2927,32 +3576,60 @@ function isMatchOpenForPrediction(match: Match, lockMinutes = 0, now = new Date(
   return lockAt > now.getTime();
 }
 
-function isMatchStarted(match: Match, now = new Date()) {
-  if (!['SCHEDULED', 'TIMED'].includes(match.status)) {
-    return true;
-  }
-
-  const kickoffMs = Date.parse(match.utcDate);
-  if (Number.isNaN(kickoffMs)) {
-    return false;
-  }
-
-  return now.getTime() >= kickoffMs;
-}
-
 function calculatePredictionPoints(match: Match, prediction: MatchPrediction): PredictionPoints {
   const result = getMatchResult(match);
   if (!result) {
-    return { ready: false, winner: 0, ht: 0, ft: 0, total: 0 };
+    return { ready: false, winner: 0, ht: 0, ft: 0, goalEvent: 0, yellowEvent: 0, redEvent: 0, total: 0 };
   }
 
   const predictedWinner = getWinner(prediction.ft_home, prediction.ft_away);
   const winner = predictedWinner === result.winner ? 1 : 0;
   const ht = prediction.ht_home === result.htHome && prediction.ht_away === result.htAway ? 1 : 0;
   const ft = prediction.ft_home === result.ftHome && prediction.ft_away === result.ftAway ? 1 : 0;
+  const normalize = (value: string) =>
+    value
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9\s'-]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  const parsePredicted = (value: string) => {
+    if (value.startsWith(HOME_PICK_PREFIX)) return { name: value.slice(HOME_PICK_PREFIX.length), side: 'home' as const };
+    if (value.startsWith(AWAY_PICK_PREFIX)) return { name: value.slice(AWAY_PICK_PREFIX.length), side: 'away' as const };
+    return { name: value, side: null as 'home' | 'away' | null };
+  };
+  const homeTeamNormalized = normalize(match.homeTeam.name ?? '');
+  const awayTeamNormalized = normalize(match.awayTeam.name ?? '');
+  const hasEventMatch = (predictedPlayers: string[] | undefined, incidents: MatchIncident[] | undefined) => {
+    if (!predictedPlayers?.length || !incidents?.length) return 0;
+    const actual = incidents
+      .map((item) => ({
+        player: normalize(String(item.player ?? '')),
+        team: normalize(String(item.team ?? ''))
+      }))
+      .filter((item) => item.player.length > 0);
+    return predictedPlayers.some((raw) => {
+      const predicted = parsePredicted(String(raw ?? ''));
+      const playerName = normalize(predicted.name);
+      if (!playerName) return false;
+      return actual.some((row) => {
+        if (row.player !== playerName) return false;
+        if (predicted.side === 'home' && homeTeamNormalized && row.team && row.team !== homeTeamNormalized) return false;
+        if (predicted.side === 'away' && awayTeamNormalized && row.team && row.team !== awayTeamNormalized) return false;
+        return true;
+      });
+    })
+      ? 1
+      : 0;
+  };
+  const goalEvent = hasEventMatch(prediction.goal_players, match.incidents?.goals);
+  const yellowEvent = hasEventMatch(prediction.yellow_card_players, match.incidents?.yellowCards);
+  const redEvent = hasEventMatch(prediction.red_card_players, match.incidents?.redCards);
   const perfectBonus = winner === 1 && ht === 1 && ft === 1 ? 2 : 0;
+  const eventBonus = goalEvent + yellowEvent + redEvent;
 
-  return { ready: true, winner, ht, ft, total: winner + ht + ft + perfectBonus };
+  return { ready: true, winner, ht, ft, goalEvent, yellowEvent, redEvent, total: winner + ht + ft + perfectBonus + eventBonus };
 }
 
 function formatMatchDateTime(utcDate: string) {

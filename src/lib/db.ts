@@ -31,6 +31,9 @@ export type MatchPrediction = {
   ht_away: number;
   ft_home: number;
   ft_away: number;
+  goal_players: string[];
+  yellow_card_players: string[];
+  red_card_players: string[];
   created_at: string;
 };
 
@@ -224,6 +227,9 @@ export async function savePrediction(input: {
   htAway: number;
   ftHome: number;
   ftAway: number;
+  goalPlayers?: string[];
+  yellowCardPlayers?: string[];
+  redCardPlayers?: string[];
 }) {
   await authedFetch('/internal/db/predictions', {
     method: 'POST',
@@ -234,7 +240,10 @@ export async function savePrediction(input: {
       htHome: input.htHome,
       htAway: input.htAway,
       ftHome: input.ftHome,
-      ftAway: input.ftAway
+      ftAway: input.ftAway,
+      goalPlayers: input.goalPlayers ?? [],
+      yellowCardPlayers: input.yellowCardPlayers ?? [],
+      redCardPlayers: input.redCardPlayers ?? []
     })
   });
 }

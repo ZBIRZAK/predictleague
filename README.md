@@ -1,18 +1,17 @@
 # PredictLeague (React + Vite + Node Proxy + Firebase + Supabase)
 
-A football web app inspired by 365scores style, powered by [football-data.org](https://www.football-data.org/).
+A football web app inspired by 365scores style, powered by ESPN public soccer endpoints.
 
 ## Architecture
 
 - Frontend: React + Vite (`src/`)
 - Backend proxy: Express (`server/index.ts`)
 - All app API calls go to `/api/v4/...` on the backend
-- The backend injects `X-Auth-Token` from server env (`FOOTBALL_DATA_API_KEY`)
 - Authentication: Firebase Email/Password + Google Sign-In
 - Data storage (groups, invites, predictions): Supabase Postgres
 - Authenticated backend DB routes: `/internal/db/...` (groups, invites, predictions, profile)
 
-This keeps the API key server-side in production and avoids exposing it in browser code.
+This keeps third-party API handling server-side in production and avoids exposing backend logic in browser code.
 
 ## Requirements
 
@@ -34,9 +33,9 @@ This keeps the API key server-side in production and avoids exposing it in brows
 Copy `.env.example` to `.env` and set:
 
 ```bash
-FOOTBALL_DATA_API_KEY=your_key
 PORT=8787
 VITE_API_PROXY_TARGET=http://localhost:8787
+FOOTBALL_DATA_API_KEY=
 VITE_FIREBASE_API_KEY=
 VITE_FIREBASE_AUTH_DOMAIN=
 VITE_FIREBASE_PROJECT_ID=
@@ -70,6 +69,10 @@ Billing/paywall:
 - Free users can create up to `FREE_MAX_OWNED_GROUPS` groups.
 - Pro plan uses PayPal checkout (`$4.99/mo` by default, configurable with `PAYWALL_PRO_PRICE_USD`).
 - Configure `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET` on the server to enable upgrade flow.
+
+Data sourcing:
+- Matches/game endpoints are ESPN-backed.
+- Home-side `Classification` and `Top Scorers` endpoints (`/standings`, `/scorers`) prefer football-data.org when `FOOTBALL_DATA_API_KEY` is set, with ESPN fallback.
 
 Debug endpoint:
 - `GET /internal/smtp-health` is authenticated and available only outside production.

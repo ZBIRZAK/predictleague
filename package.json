@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "node node_modules/npm-run-all/bin/npm-run-all/index.js --parallel dev:api dev:web",
     "dev:api": "node --env-file=.env node_modules/tsx/dist/cli.mjs watch server/index.ts",
-    "dev:web": "node node_modules/vite/bin/vite.js",
+    "dev:web": "node scripts/wait-for-port.mjs 8787 && node node_modules/vite/bin/vite.js",
     "typecheck": "node node_modules/typescript/bin/tsc --noEmit && node node_modules/typescript/bin/tsc --noEmit -p tsconfig.server.json",
     "build": "npm run typecheck && node node_modules/vite/bin/vite.js build && node node_modules/typescript/bin/tsc -p tsconfig.server.json",
     "preview": "node node_modules/vite/bin/vite.js preview",
