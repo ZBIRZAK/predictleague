@@ -145,6 +145,23 @@ async function authedFetch(path: string, init: RequestInit = {}) {
   return response.json();
 }
 
+async function publicJsonFetch(path: string, init: RequestInit = {}) {
+  const headers = new Headers(init.headers);
+  if (init.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+
+  const response = await fetch(path, { ...init, headers });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(payload.error ?? `Request failed (${response.status}).`);
+  }
+  if (response.status === 204) {
+    return null;
+  }
+  return response.json();
+}
+
 export async function createGroup(params: {
   ownerUid: string;
   ownerEmail: string;
@@ -392,4 +409,18 @@ export async function capturePayPalOrder(orderId: string) {
     method: 'POST',
     body: JSON.stringify({ orderId })
   })) as { ok: boolean; tier: 'pro'; status: string; proExpiresAt: string | null };
+}
+
+export async function sendSignupVerificationCode(email: string) {
+  return (await publicJsonFetch('/internal/auth/email-verification/send', {
+    method: 'POST',
+    body: JSON.stringify({ email })
+  })) as { ok: boolean; expiresInSeconds: number };
+}
+
+export async function verifySignupVerificationCode(email: string, code: string) {
+  return (await publicJsonFetch('/internal/auth/email-verification/verify', {
+    method: 'POST',
+    body: JSON.stringify({ email, code })
+  })) as { ok: boolean };
 }

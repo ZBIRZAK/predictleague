@@ -22,10 +22,12 @@ import {
   loadInvitesForGroup,
   loadPredictionsForGroup,
   savePrediction,
+  sendSignupVerificationCode,
   updateGroupSettings,
   updateGroupCustomMatches,
   upsertUserProfile,
   upsertGroupBonusMatches,
+  verifySignupVerificationCode,
   type AppGroup,
   type GroupBonusMatch,
   type GroupMember,
@@ -200,6 +202,7 @@ type ResponsiblePlayForm = {
 
 type AppPage = 'home' | 'game' | 'profile';
 type ThemeMode = 'light' | 'dark';
+const SIGNUP_CODE_RESEND_SECONDS = 45;
 
 const statuses: Array<{ label: string; value: StatusFilter }> = [
   { label: 'All', value: '' },
@@ -673,6 +676,11 @@ function App() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
+  const [signupVerificationCode, setSignupVerificationCode] = useState('');
+  const [signupCodeSent, setSignupCodeSent] = useState(false);
+  const [signupCodeEmail, setSignupCodeEmail] = useState('');
+  const [signupCodeCooldownEndsAt, setSignupCodeCooldownEndsAt] = useState(0);
+  const [signupCodeCooldownLeft, setSignupCodeCooldownLeft] = useState(0);
   const [signupProfile, setSignupProfile] = useState<ProfileForm>({
     firstName: '',
     lastName: '',
@@ -961,6 +969,32 @@ function App() {
       setAuthReady(true);
     });
   }, []);
+
+  useEffect(() => {
+    if (authMode !== 'signup') {
+      setSignupVerificationCode('');
+      setSignupCodeSent(false);
+      setSignupCodeEmail('');
+      setSignupCodeCooldownEndsAt(0);
+      setSignupCodeCooldownLeft(0);
+    }
+  }, [authMode]);
+
+  useEffect(() => {
+    if (signupCodeCooldownEndsAt <= Date.now()) {
+      setSignupCodeCooldownLeft(0);
+      return;
+    }
+
+    const tick = () => {
+      const remainingMs = Math.max(0, signupCodeCooldownEndsAt - Date.now());
+      setSignupCodeCooldownLeft(Math.ceil(remainingMs / 1000));
+    };
+
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [signupCodeCooldownEndsAt]);
 
   useEffect(() => {
     void loadCompetitions();
@@ -1740,7 +1774,8 @@ function App() {
   }
 
   async function handleRegister() {
-    if (!isValidEmailAddress(email.trim().toLowerCase())) {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!isValidEmailAddress(normalizedEmail)) {
       setError('Enter a valid email address.');
       return;
     }
@@ -1753,14 +1788,42 @@ function App() {
       return;
     }
 
+    if (!signupCodeSent || signupCodeEmail !== normalizedEmail) {
+      if (signupCodeCooldownLeft > 0) {
+        setError(`Please wait ${signupCodeCooldownLeft}s before requesting another code.`);
+        return;
+      }
+      try {
+        setAuthLoading(true);
+        setError('');
+        setMessage('');
+        await sendSignupVerificationCode(normalizedEmail);
+        setSignupCodeSent(true);
+        setSignupCodeEmail(normalizedEmail);
+        setSignupCodeCooldownEndsAt(Date.now() + SIGNUP_CODE_RESEND_SECONDS * 1000);
+        setMessage('Verification code sent. Enter the 6-digit code to finish signup.');
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to send verification code.');
+      } finally {
+        setAuthLoading(false);
+      }
+      return;
+    }
+
+    if (!/^\d{6}$/.test(signupVerificationCode.trim())) {
+      setError('Enter the 6-digit verification code.');
+      return;
+    }
+
     try {
       setAuthLoading(true);
       setError('');
       setMessage('');
-      const credential = await createUserWithEmailAndPassword(firebaseAuth, email.trim().toLowerCase(), password);
+      await verifySignupVerificationCode(normalizedEmail, signupVerificationCode.trim());
+      const credential = await createUserWithEmailAndPassword(firebaseAuth, normalizedEmail, password);
       await upsertUserProfile({
         userUid: credential.user.uid,
-        email: credential.user.email ?? email.trim().toLowerCase(),
+        email: credential.user.email ?? normalizedEmail,
         firstName: signupProfile.firstName,
         lastName: signupProfile.lastName,
         displayName: signupProfile.displayName,
@@ -1770,9 +1833,39 @@ function App() {
       });
       setConfirmPassword('');
       setPassword('');
+      setSignupVerificationCode('');
+      setSignupCodeSent(false);
+      setSignupCodeEmail('');
       setMessage('Account created. You are signed in.');
     } catch (err) {
       setError(mapFirebaseAuthError(err, 'Registration failed.'));
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  async function handleSendSignupCode() {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!isValidEmailAddress(normalizedEmail)) {
+      setError('Enter a valid email address before requesting a verification code.');
+      return;
+    }
+    if (signupCodeCooldownLeft > 0) {
+      setError(`Please wait ${signupCodeCooldownLeft}s before requesting another code.`);
+      return;
+    }
+
+    try {
+      setAuthLoading(true);
+      setError('');
+      setMessage('');
+      await sendSignupVerificationCode(normalizedEmail);
+      setSignupCodeSent(true);
+      setSignupCodeEmail(normalizedEmail);
+      setSignupCodeCooldownEndsAt(Date.now() + SIGNUP_CODE_RESEND_SECONDS * 1000);
+      setMessage(`Verification code sent to ${normalizedEmail}.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to send verification code.');
     } finally {
       setAuthLoading(false);
     }
@@ -2557,6 +2650,9 @@ function App() {
                   onClick={() => {
                     setAuthMode('login');
                     setConfirmPassword('');
+                    setSignupVerificationCode('');
+                    setSignupCodeSent(false);
+                    setSignupCodeEmail('');
                     setError('');
                     setMessage('');
                   }}
@@ -2569,6 +2665,9 @@ function App() {
                   onClick={() => {
                     setAuthMode('signup');
                     setConfirmPassword('');
+                    setSignupVerificationCode('');
+                    setSignupCodeSent(false);
+                    setSignupCodeEmail('');
                     setError('');
                     setMessage('');
                   }}
@@ -2611,6 +2710,7 @@ function App() {
                     />
                   </label>
                   <p className="muted auth-hint">Use 8+ characters and keep your password secure.</p>
+                  <p className="muted auth-hint">After you click Sign up, we will email a 6-digit verification code.</p>
                 </>
               ) : null}
               {authMode === 'signup' ? (
@@ -2669,6 +2769,33 @@ function App() {
                 </div>
               ) : null}
 
+              {authMode === 'signup' && signupCodeSent ? (
+                <section className="auth-verification-panel">
+                  <h4>Email Verification</h4>
+                  <label>
+                    Verification Code
+                    <input
+                      value={signupVerificationCode}
+                      onChange={(e) => setSignupVerificationCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      placeholder="6-digit code"
+                    />
+                  </label>
+                  <div className="auth-actions">
+                    <button
+                      type="button"
+                      className="details-btn"
+                      onClick={() => void handleSendSignupCode()}
+                      disabled={authLoading || !isAuthEmailValid || signupCodeCooldownLeft > 0}
+                    >
+                      {signupCodeCooldownLeft > 0 ? `Resend in ${signupCodeCooldownLeft}s` : 'Resend Code'}
+                    </button>
+                  </div>
+                </section>
+              ) : null}
+
               <div className="auth-actions">
                 <button
                   type="button"
@@ -2676,7 +2803,7 @@ function App() {
                   onClick={() => void (authMode === 'login' ? handleLogin() : handleRegister())}
                   disabled={authLoading || !canSubmitAuth}
                 >
-                  {authLoading ? 'Please wait...' : authMode === 'login' ? 'Login' : 'Create account'}
+                  {authLoading ? 'Please wait...' : authMode === 'login' ? 'Login' : signupCodeSent ? 'Verify account' : 'Sign up'}
                 </button>
                 <button
                   type="button"
@@ -2684,6 +2811,9 @@ function App() {
                   onClick={() => {
                     setAuthMode((prev) => (prev === 'login' ? 'signup' : 'login'));
                     setConfirmPassword('');
+                    setSignupVerificationCode('');
+                    setSignupCodeSent(false);
+                    setSignupCodeEmail('');
                     setError('');
                     setMessage('');
                   }}

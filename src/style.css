@@ -797,6 +797,19 @@ textarea {
   color: var(--text-soft);
 }
 
+.auth-verification-panel {
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  padding: 0.7rem;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.auth-verification-panel h4 {
+  margin: 0;
+  font-size: 0.86rem;
+}
+
 .profile-shell {
   display: grid;
   gap: 0.9rem;

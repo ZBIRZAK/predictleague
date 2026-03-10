@@ -51,6 +51,13 @@ let smtpLastVerifyError: string | null = null;
 const inviteRateLimitStore = new Map<string, number[]>();
 const INVITE_RATE_WINDOW_MS = 60_000;
 const INVITE_RATE_LIMIT = 8;
+const signupVerificationStore = new Map<
+  string,
+  { code: string; expiresAt: number; sentAt: number; attempts: number }
+>();
+const SIGNUP_CODE_TTL_MS = 10 * 60_000;
+const SIGNUP_CODE_COOLDOWN_MS = 45_000;
+const SIGNUP_CODE_MAX_ATTEMPTS = 5;
 const espnGetCache = new Map<string, { bodyText: string; expiresAt: number }>();
 const espnGetInflight = new Map<string, Promise<string>>();
 const espnEventById = new Map<number, Record<string, unknown>>();
@@ -177,6 +184,14 @@ function hitInviteRateLimit(ip: string) {
 
 function isValidEmail(value: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function normalizeEmail(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function generateSixDigitCode() {
+  return String(Math.floor(100000 + Math.random() * 900000));
 }
 
 function parseYmd(value: string) {
@@ -1781,6 +1796,108 @@ app.get('/internal/smtp-health', requireFirebaseAuth, async (req: AuthedRequest,
   });
 });
 
+app.post('/internal/auth/email-verification/send', async (req, res) => {
+  const { email } = req.body as { email?: string };
+  const normalizedEmail = normalizeEmail(String(email ?? ''));
+
+  if (!isValidEmail(normalizedEmail)) {
+    res.status(400).json({ error: 'Valid email is required.' });
+    return;
+  }
+
+  if (!mailer || !smtpFrom) {
+    res.status(500).json({ error: 'SMTP is not configured on the server.' });
+    return;
+  }
+
+  const now = Date.now();
+  const existing = signupVerificationStore.get(normalizedEmail);
+  if (existing && now - existing.sentAt < SIGNUP_CODE_COOLDOWN_MS) {
+    const waitSeconds = Math.ceil((SIGNUP_CODE_COOLDOWN_MS - (now - existing.sentAt)) / 1000);
+    res.status(429).json({ error: `Please wait ${waitSeconds}s before requesting a new code.` });
+    return;
+  }
+
+  const code = generateSixDigitCode();
+  signupVerificationStore.set(normalizedEmail, {
+    code,
+    expiresAt: now + SIGNUP_CODE_TTL_MS,
+    sentAt: now,
+    attempts: 0
+  });
+
+  try {
+    await mailer.sendMail({
+      from: smtpFrom,
+      to: normalizedEmail,
+      subject: 'Your PrediLeague verification code',
+      text: [
+        'Welcome to PrediLeague!',
+        '',
+        `Your verification code is: ${code}`,
+        'This code expires in 10 minutes.',
+        '',
+        'Enter this code in the app to complete your account registration.',
+        'Website: https://predileague.com'
+      ].join('\n'),
+      html: `
+        <div style="font-family:Arial,sans-serif;line-height:1.55;color:#1b2430">
+          <p><strong>Welcome to PrediLeague!</strong></p>
+          <p>Your verification code is:</p>
+          <p style="font-size:28px;font-weight:700;letter-spacing:3px;margin:8px 0 12px">${code}</p>
+          <p>This code expires in <strong>10 minutes</strong>.</p>
+          <p>Enter this code in the app to complete your account registration.</p>
+          <p>Website: <a href="https://predileague.com">predileague.com</a></p>
+        </div>
+      `
+    });
+
+    res.status(200).json({ ok: true, expiresInSeconds: Math.floor(SIGNUP_CODE_TTL_MS / 1000) });
+  } catch (error) {
+    signupVerificationStore.delete(normalizedEmail);
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Failed to send verification code.' });
+  }
+});
+
+app.post('/internal/auth/email-verification/verify', async (req, res) => {
+  const { email, code } = req.body as { email?: string; code?: string };
+  const normalizedEmail = normalizeEmail(String(email ?? ''));
+  const normalizedCode = String(code ?? '').trim();
+
+  if (!isValidEmail(normalizedEmail) || !/^\d{6}$/.test(normalizedCode)) {
+    res.status(400).json({ error: 'Valid email and 6-digit code are required.' });
+    return;
+  }
+
+  const entry = signupVerificationStore.get(normalizedEmail);
+  if (!entry) {
+    res.status(400).json({ error: 'No verification code found. Request a new code.' });
+    return;
+  }
+
+  if (Date.now() > entry.expiresAt) {
+    signupVerificationStore.delete(normalizedEmail);
+    res.status(400).json({ error: 'Verification code expired. Request a new one.' });
+    return;
+  }
+
+  if (entry.attempts >= SIGNUP_CODE_MAX_ATTEMPTS) {
+    signupVerificationStore.delete(normalizedEmail);
+    res.status(429).json({ error: 'Too many failed attempts. Request a new code.' });
+    return;
+  }
+
+  if (entry.code !== normalizedCode) {
+    entry.attempts += 1;
+    signupVerificationStore.set(normalizedEmail, entry);
+    res.status(400).json({ error: 'Invalid verification code.' });
+    return;
+  }
+
+  signupVerificationStore.delete(normalizedEmail);
+  res.status(200).json({ ok: true });
+});
+
 app.post('/internal/invite-email', requireFirebaseAuth, async (req: AuthedRequest, res) => {
   const { toEmail, groupName, inviterEmail, groupId } = req.body as {
     toEmail?: string;
@@ -1841,12 +1958,42 @@ app.post('/internal/invite-email', requireFirebaseAuth, async (req: AuthedReques
   }
 
   try {
+    const inviteText = [
+      `Hello,`,
+      ``,
+      `${requesterEmail} invited you to join the PredictLeague group "${groupName}".`,
+      ``,
+      `What to do next:`,
+      `1) Go to https://predileague.com`,
+      `2) Sign in (or create an account) with this same email address: ${toEmail.trim()}`,
+      `3) Your invite will be accepted automatically after login`,
+      ``,
+      `You can then submit match predictions, follow leaderboard updates, and compete with your friends.`,
+      ``,
+      `See you on predileague.com`
+    ].join('\n');
+
+    const inviteHtml = `
+      <div style="font-family:Arial,sans-serif;line-height:1.55;color:#1b2430">
+        <p>Hello,</p>
+        <p><strong>${requesterEmail}</strong> invited you to join the PredictLeague group <strong>${groupName}</strong>.</p>
+        <p><strong>What to do next:</strong></p>
+        <ol>
+          <li>Go to <a href="https://predileague.com">predileague.com</a></li>
+          <li>Sign in (or create an account) with this same email address: <strong>${toEmail.trim()}</strong></li>
+          <li>Your invite will be accepted automatically after login</li>
+        </ol>
+        <p>You can then submit match predictions, follow leaderboard updates, and compete with your friends.</p>
+        <p>See you on <a href="https://predileague.com">predileague.com</a>.</p>
+      </div>
+    `;
+
     const result = await mailer.sendMail({
       from: smtpFrom,
       to: toEmail.trim(),
       subject: `You were invited to join "${groupName}" on PredictLeague`,
-      text: `${requesterEmail} invited you to join "${groupName}" on PredictLeague.\n\nSign in with this email in the app to join the group automatically.`,
-      html: `<p>${requesterEmail} invited you to join <strong>${groupName}</strong> on PredictLeague.</p><p>Sign in with this email in the app to join the group automatically.</p>`
+      text: inviteText,
+      html: inviteHtml
     });
     res.status(200).json({
       messageId: result.messageId,
