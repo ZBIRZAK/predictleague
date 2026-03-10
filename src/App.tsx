@@ -11,10 +11,9 @@ import {
 import {
   acceptPendingInvites,
   createGroup,
-  createPayPalOrder,
-  capturePayPalOrder,
-  loadBillingStatus,
+  deleteGroup,
   loadGroupBonusMatches,
+  loadGroupCustomMatches,
   loadGroupLeaderboard,
   loadGroupMembers,
   loadUserProfile,
@@ -24,6 +23,7 @@ import {
   loadPredictionsForGroup,
   savePrediction,
   updateGroupSettings,
+  updateGroupCustomMatches,
   upsertUserProfile,
   upsertGroupBonusMatches,
   type AppGroup,
@@ -31,8 +31,8 @@ import {
   type GroupMember,
   type GroupLeaderboard,
   type GroupInvite,
+  type GroupCustomMatch,
   type MatchPrediction,
-  type BillingStatus,
   type UserProfile
 } from './lib/db';
 import { firebaseAuth } from './lib/firebase';
@@ -199,6 +199,7 @@ type ResponsiblePlayForm = {
 };
 
 type AppPage = 'home' | 'game' | 'profile';
+type ThemeMode = 'light' | 'dark';
 
 const statuses: Array<{ label: string; value: StatusFilter }> = [
   { label: 'All', value: '' },
@@ -215,6 +216,17 @@ const LIVE_MATCH_STATUSES = new Set([
   'EXTRA_TIME',
   'PENALTY_SHOOTOUT',
   'SUSPENDED'
+]);
+
+const NON_SELECTABLE_CUSTOM_MATCH_STATUSES = new Set([
+  'FINISHED',
+  'FINAL',
+  'FT',
+  'FULL_TIME',
+  'POSTPONED',
+  'CANCELLED',
+  'CANCELED',
+  'AWARDED'
 ]);
 
 
@@ -400,6 +412,11 @@ function isPredictionDraftDirty(draft: PredictionDraft, saved: MatchPrediction |
     !areStringArraysEqual(normalizePlayerPicksCsv(draft.redCardPlayersHome), normalizePlayerPicksCsv(savedRed.home)) ||
     !areStringArraysEqual(normalizePlayerPicksCsv(draft.redCardPlayersAway), normalizePlayerPicksCsv(savedRed.away))
   );
+}
+
+function isSelectableCustomMatch(match: Match) {
+  const status = String(match.status ?? '').trim().toUpperCase();
+  return !NON_SELECTABLE_CUSTOM_MATCH_STATUSES.has(status);
 }
 
 function colorFromText(input: string, saturation = 70, lightness = 48) {
@@ -644,6 +661,10 @@ function PlayerPicksInput({
 function App() {
   const today = useMemo(() => getTodayLocalDateInputValue(), []);
   const [page, setPage] = useState<AppPage>(() => getPageFromHash(window.location.hash));
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
+    const saved = window.localStorage.getItem('predileague-theme');
+    return saved === 'dark' ? 'dark' : 'light';
+  });
 
   const [authReady, setAuthReady] = useState(false);
   const [user, setUser] = useState<User | null>(null);
@@ -671,9 +692,6 @@ function App() {
   const [profileRecord, setProfileRecord] = useState<UserProfile | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileSaving, setProfileSaving] = useState(false);
-  const [billingStatus, setBillingStatus] = useState<BillingStatus | null>(null);
-  const [billingLoading, setBillingLoading] = useState(false);
-  const [billingBusy, setBillingBusy] = useState(false);
   const [responsibleForm, setResponsibleForm] = useState<ResponsiblePlayForm>({
     remindersEnabled: true,
     reminderMinutesBefore: '30',
@@ -727,12 +745,25 @@ function App() {
 
   const [newGroupName, setNewGroupName] = useState('');
   const [newGroupCompetitionId, setNewGroupCompetitionId] = useState('');
+  const [newGroupMatchMode, setNewGroupMatchMode] = useState<'competition' | 'custom'>('competition');
+  const [newGroupCustomMatchDate, setNewGroupCustomMatchDate] = useState(today);
+  const [newGroupCustomPool, setNewGroupCustomPool] = useState<Match[]>([]);
+  const [newGroupCustomPoolLoading, setNewGroupCustomPoolLoading] = useState(false);
+  const [newGroupCustomCompetitionFilter, setNewGroupCustomCompetitionFilter] = useState('');
+  const [newGroupCustomCountryFilter, setNewGroupCustomCountryFilter] = useState('');
+  const [newGroupCustomMatchIds, setNewGroupCustomMatchIds] = useState<number[]>([]);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteSending, setInviteSending] = useState(false);
+  const [groupDeleting, setGroupDeleting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [savingAll, setSavingAll] = useState(false);
   const [groupMatchesLoading, setGroupMatchesLoading] = useState(false);
-  const [matchSaveState, setMatchSaveState] = useState<Record<number, { status: 'saving' | 'saved' | 'error'; note?: string }>>({});
+  const [selectedGroupCustomMatches, setSelectedGroupCustomMatches] = useState<GroupCustomMatch[]>([]);
+  const [selectedGroupCustomPool, setSelectedGroupCustomPool] = useState<Match[]>([]);
+  const [selectedGroupCustomPoolLoading, setSelectedGroupCustomPoolLoading] = useState(false);
+  const [selectedGroupCustomCompetitionFilter, setSelectedGroupCustomCompetitionFilter] = useState('');
+  const [selectedGroupCustomCountryFilter, setSelectedGroupCustomCountryFilter] = useState('');
+  const [customSelectionSaving, setCustomSelectionSaving] = useState(false);
   const [perfectCongratsMatch, setPerfectCongratsMatch] = useState<string | null>(null);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const shownPerfectCongratsRef = useRef<Set<string>>(new Set());
@@ -813,10 +844,6 @@ function App() {
   const standingsCompetitions = useMemo(() => footballDataCompetitions, [footballDataCompetitions]);
 
   const groupLeaderboard = groupLeaderboardData?.leaderboard ?? [];
-  const freeGroupLimit = 1;
-  const isFreePlan = billingStatus?.tier !== 'pro';
-  const hasReachedFreeGroupLimit = isFreePlan && groups.length >= freeGroupLimit;
-
   const completedDraftCount = useMemo(() => {
     let total = 0;
     for (const match of groupMatches) {
@@ -841,6 +868,79 @@ function App() {
     return total;
   }, [groupMatches, myPredictions, predictionDrafts]);
 
+  const selectableSelectedGroupCustomPool = useMemo(
+    () => selectedGroupCustomPool.filter(isSelectableCustomMatch),
+    [selectedGroupCustomPool]
+  );
+
+  const selectedGroupCustomCompetitionOptions = useMemo(() => {
+    return Array.from(
+      new Set(
+        selectableSelectedGroupCustomPool
+          .map((match) => match.competition?.name?.trim())
+          .filter((value): value is string => Boolean(value))
+      )
+    ).sort((a, b) => a.localeCompare(b));
+  }, [selectableSelectedGroupCustomPool]);
+
+  const selectedGroupCustomCountryOptions = useMemo(() => {
+    return Array.from(
+      new Set(
+        selectableSelectedGroupCustomPool
+          .map((match) => (match.competition?.area?.name ?? match.area?.name ?? '').trim())
+          .filter((value): value is string => Boolean(value))
+      )
+    ).sort((a, b) => a.localeCompare(b));
+  }, [selectableSelectedGroupCustomPool]);
+
+  const filteredSelectedGroupCustomPool = useMemo(() => {
+    return selectableSelectedGroupCustomPool.filter((match) => {
+      const competitionName = (match.competition?.name ?? '').trim();
+      const countryName = (match.competition?.area?.name ?? match.area?.name ?? '').trim();
+      if (selectedGroupCustomCompetitionFilter && competitionName !== selectedGroupCustomCompetitionFilter) {
+        return false;
+      }
+      if (selectedGroupCustomCountryFilter && countryName !== selectedGroupCustomCountryFilter) {
+        return false;
+      }
+      return true;
+    });
+  }, [
+    selectableSelectedGroupCustomPool,
+    selectedGroupCustomCompetitionFilter,
+    selectedGroupCustomCountryFilter
+  ]);
+
+  const newGroupCustomCompetitionOptions = useMemo(() => {
+    return Array.from(
+      new Set(newGroupCustomPool.map((match) => match.competition?.name?.trim()).filter((value): value is string => Boolean(value)))
+    ).sort((a, b) => a.localeCompare(b));
+  }, [newGroupCustomPool]);
+
+  const newGroupCustomCountryOptions = useMemo(() => {
+    return Array.from(
+      new Set(
+        newGroupCustomPool
+          .map((match) => (match.competition?.area?.name ?? match.area?.name ?? '').trim())
+          .filter((value): value is string => Boolean(value))
+      )
+    ).sort((a, b) => a.localeCompare(b));
+  }, [newGroupCustomPool]);
+
+  const filteredNewGroupCustomPool = useMemo(() => {
+    return newGroupCustomPool.filter((match) => {
+      const competitionName = (match.competition?.name ?? '').trim();
+      const countryName = (match.competition?.area?.name ?? match.area?.name ?? '').trim();
+      if (newGroupCustomCompetitionFilter && competitionName !== newGroupCustomCompetitionFilter) {
+        return false;
+      }
+      if (newGroupCustomCountryFilter && countryName !== newGroupCustomCountryFilter) {
+        return false;
+      }
+      return true;
+    });
+  }, [newGroupCustomCompetitionFilter, newGroupCustomCountryFilter, newGroupCustomPool]);
+
   useEffect(() => {
     const onHashChange = () => {
       setPage(getPageFromHash(window.location.hash));
@@ -849,6 +949,11 @@ function App() {
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', themeMode);
+    window.localStorage.setItem('predileague-theme', themeMode);
+  }, [themeMode]);
 
   useEffect(() => {
     return onAuthStateChanged(firebaseAuth, (nextUser) => {
@@ -860,6 +965,39 @@ function App() {
   useEffect(() => {
     void loadCompetitions();
   }, []);
+
+  useEffect(() => {
+    if (newGroupMatchMode !== 'custom') {
+      setNewGroupCustomPool([]);
+      setNewGroupCustomMatchIds([]);
+      setNewGroupCustomCompetitionFilter('');
+      setNewGroupCustomCountryFilter('');
+      return;
+    }
+    let cancelled = false;
+    const load = async () => {
+      try {
+        setNewGroupCustomPoolLoading(true);
+        const matches = (await loadAllMatchesForDate(newGroupCustomMatchDate)).filter(isSelectableCustomMatch);
+        if (cancelled) return;
+        setNewGroupCustomPool(matches);
+        const validIds = new Set(matches.map((item) => item.id));
+        setNewGroupCustomMatchIds((prev) => prev.filter((id) => validIds.has(id)));
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : 'Failed to load matches for custom selection.');
+        }
+      } finally {
+        if (!cancelled) {
+          setNewGroupCustomPoolLoading(false);
+        }
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [newGroupMatchMode, newGroupCustomMatchDate]);
 
   useEffect(() => {
     if (!standingsCompetitionId && standingsCompetitions.length > 0) {
@@ -892,7 +1030,6 @@ function App() {
       setGroups([]);
       setSelectedGroupId('');
       setProfileRecord(null);
-      setBillingStatus(null);
       setProfileMenuOpen(false);
       setProfileForm({
         firstName: '',
@@ -908,69 +1045,6 @@ function App() {
 
     void bootstrapForUser(user);
     void loadProfileForUser(user);
-    void loadBillingForUser(user);
-  }, [user]);
-
-  useEffect(() => {
-    if (!user) return;
-
-    const params = new URLSearchParams(window.location.search);
-    const paypalState = params.get('paypal');
-    if (!paypalState) return;
-
-    const clearPaypalQuery = () => {
-      const nextParams = new URLSearchParams(window.location.search);
-      nextParams.delete('paypal');
-      nextParams.delete('token');
-      nextParams.delete('PayerID');
-      const nextQuery = nextParams.toString();
-      const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ''}${window.location.hash}`;
-      window.history.replaceState({}, '', nextUrl);
-    };
-
-    if (paypalState === 'cancel') {
-      setMessage('PayPal checkout canceled.');
-      clearPaypalQuery();
-      return;
-    }
-
-    if (paypalState !== 'success') {
-      clearPaypalQuery();
-      return;
-    }
-
-    const orderId = params.get('token');
-    if (!orderId) {
-      setError('Missing PayPal order token.');
-      clearPaypalQuery();
-      return;
-    }
-
-    let cancelled = false;
-    const captureOrder = async () => {
-      try {
-        setBillingBusy(true);
-        setError('');
-        await capturePayPalOrder(orderId);
-        if (cancelled) return;
-        await loadBillingForUser(user);
-        setMessage('Payment successful. Pro plan is now active.');
-      } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'Failed to confirm PayPal payment.');
-        }
-      } finally {
-        if (!cancelled) {
-          setBillingBusy(false);
-        }
-        clearPaypalQuery();
-      }
-    };
-
-    void captureOrder();
-    return () => {
-      cancelled = true;
-    };
   }, [user]);
 
   useEffect(() => {
@@ -988,18 +1062,17 @@ function App() {
   useEffect(() => {
     if (!user || !selectedGroup) {
       setGroupMatches([]);
+      setSelectedGroupCustomMatches([]);
       setMyPredictions({});
       setGroupPredictionsByMatch({});
       setGroupMembers([]);
       setGroupLeaderboardData(null);
       setGroupBonusMatches([]);
-      setMatchSaveState({});
       return;
     }
 
     setLockMinutesInput(String(selectedGroup.prediction_lock_minutes ?? 0));
     setBonusEnabledInput(Boolean(selectedGroup.bonus_enabled));
-    setMatchSaveState({});
     void loadGroupData(user.uid, selectedGroup);
   }, [selectedGroup, user, today]);
 
@@ -1054,6 +1127,36 @@ function App() {
       break;
     }
   }, [groupMatches, myPredictions, selectedGroup, user]);
+
+  useEffect(() => {
+    if (!selectedGroup || selectedGroup.match_selection_mode !== 'custom') {
+      setSelectedGroupCustomPool([]);
+      setSelectedGroupCustomCompetitionFilter('');
+      setSelectedGroupCustomCountryFilter('');
+      return;
+    }
+    let cancelled = false;
+    const load = async () => {
+      try {
+        setSelectedGroupCustomPoolLoading(true);
+        const matches = (await loadAllMatchesForDate(today)).filter(isSelectableCustomMatch);
+        if (cancelled) return;
+        setSelectedGroupCustomPool(matches);
+      } catch {
+        if (!cancelled) {
+          setSelectedGroupCustomPool([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setSelectedGroupCustomPoolLoading(false);
+        }
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedGroup?.id, selectedGroup?.match_selection_mode, today]);
 
   useEffect(() => {
     if (groupMatches.length === 0) return;
@@ -1230,18 +1333,6 @@ function App() {
     }
   }
 
-  async function loadBillingForUser(_: User) {
-    try {
-      setBillingLoading(true);
-      const status = await loadBillingStatus();
-      setBillingStatus(status);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load billing status.');
-    } finally {
-      setBillingLoading(false);
-    }
-  }
-
   async function handleSaveProfile() {
     if (!user) {
       setError('You need to be logged in to save profile.');
@@ -1284,22 +1375,6 @@ function App() {
     }
   }
 
-  async function handleUpgradeToPro() {
-    try {
-      setBillingBusy(true);
-      setError('');
-      const order = await createPayPalOrder();
-      if (!order.approveUrl) {
-        throw new Error('PayPal approval URL is missing.');
-      }
-      window.location.href = order.approveUrl;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to start PayPal checkout.');
-    } finally {
-      setBillingBusy(false);
-    }
-  }
-
   async function bootstrapForUser(currentUser: User) {
     try {
       setBusy(true);
@@ -1337,6 +1412,16 @@ function App() {
     return (payload.matches ?? []).filter((match) => toLocalDateInputValue(match.utcDate) === targetDate);
   }
 
+  async function loadAllMatchesForDate(targetDate: string) {
+    const query = new URLSearchParams({ dateFrom: targetDate, dateTo: targetDate });
+    const response = await fetch(`/api/v4/matches?${query.toString()}`, { cache: 'no-store' });
+    if (!response.ok) {
+      throw new Error('Failed to fetch matches.');
+    }
+    const payload = (await response.json()) as MatchListResponse;
+    return (payload.matches ?? []).filter((match) => toLocalDateInputValue(match.utcDate) === targetDate);
+  }
+
   async function loadMatchById(matchId: number) {
     const response = await fetch(`/api/v4/matches/${matchId}`, { cache: 'no-store' });
     if (!response.ok) {
@@ -1344,6 +1429,30 @@ function App() {
     }
     const payload = (await response.json()) as { match?: Match } & Match;
     return payload.match ?? payload;
+  }
+
+  async function loadMatchesByIds(matchIds: number[]) {
+    const uniqueIds = Array.from(new Set(matchIds.filter((value) => Number.isFinite(value) && value > 0)));
+    const rows = await Promise.all(
+      uniqueIds.map(async (matchId) => {
+        const match = await loadMatchById(matchId);
+        return match;
+      })
+    );
+    return rows.filter((row): row is Match => Boolean(row));
+  }
+
+  async function loadMatchesForGroupSelection(group: AppGroup, targetDate: string) {
+    if (group.match_selection_mode === 'custom') {
+      const selected = await loadGroupCustomMatches(group.id, targetDate);
+      setSelectedGroupCustomMatches(selected);
+      const matches = await loadMatchesByIds(selected.map((item) => item.match_id));
+      return matches
+        .filter((match) => toLocalDateInputValue(match.utcDate) === targetDate)
+        .sort((a, b) => Date.parse(a.utcDate) - Date.parse(b.utcDate));
+    }
+    setSelectedGroupCustomMatches([]);
+    return loadMatchesForCompetition(group.competition_id, targetDate);
   }
 
   async function loadTeamById(teamId: number) {
@@ -1493,6 +1602,34 @@ function App() {
     }
   }
 
+  async function handleSaveCustomSelection() {
+    if (!selectedGroup) return;
+    if (!isGroupOwner) {
+      setError('Only group owner can update custom match selection.');
+      return;
+    }
+    if (selectedGroup.match_selection_mode !== 'custom') {
+      setError('This group uses competition mode.');
+      return;
+    }
+
+    const matchIds = groupMatches.map((match) => match.id);
+    try {
+      setCustomSelectionSaving(true);
+      setError('');
+      const rows = await updateGroupCustomMatches(selectedGroup.id, {
+        matchDate: today,
+        matchIds
+      });
+      setSelectedGroupCustomMatches(rows);
+      setMessage('Custom match selection updated.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save custom match selection.');
+    } finally {
+      setCustomSelectionSaving(false);
+    }
+  }
+
   async function loadGroupData(userUid: string, group: AppGroup) {
     try {
       setGroupMatchesLoading(true);
@@ -1502,7 +1639,7 @@ function App() {
         loadInvitesForGroup(group.id),
         loadPredictionsForGroup({ groupId: group.id, matchDate: today }),
         loadGroupMembers(group.id),
-        loadMatchesForCompetition(group.competition_id, today)
+        loadMatchesForGroupSelection(group, today)
       ]);
 
       setInvites(inviteRows);
@@ -1550,7 +1687,7 @@ function App() {
 
   async function refreshGroupMatchesOnly(group: AppGroup) {
     try {
-      const latestMatches = await loadMatchesForCompetition(group.competition_id, today);
+      const latestMatches = await loadMatchesForGroupSelection(group, today);
       const liveMatches = latestMatches.filter((match) => LIVE_MATCH_STATUSES.has(String(match.status ?? '').toUpperCase()));
       if (liveMatches.length === 0) {
         setGroupMatches(latestMatches);
@@ -1707,14 +1844,17 @@ function App() {
       setError('Login with a valid email account.');
       return;
     }
-    if (hasReachedFreeGroupLimit) {
-      setError('Free plan allows only 1 group. Upgrade to Pro to create more groups.');
+    const selectedCompetition = competitions.find((item) => String(item.id) === newGroupCompetitionId);
+    if (!newGroupName.trim()) {
+      setError('Group name is required.');
       return;
     }
-
-    const selectedCompetition = competitions.find((item) => String(item.id) === newGroupCompetitionId);
-    if (!newGroupName.trim() || !selectedCompetition) {
-      setError('Group name and competition are required.');
+    if (newGroupMatchMode === 'competition' && !selectedCompetition) {
+      setError('Competition is required for competition mode.');
+      return;
+    }
+    if (newGroupMatchMode === 'custom' && newGroupCustomMatchIds.length === 0) {
+      setError('Select at least one custom match.');
       return;
     }
 
@@ -1725,20 +1865,66 @@ function App() {
         ownerUid: user.uid,
         ownerEmail: user.email,
         name: newGroupName,
-        competitionId: selectedCompetition.id,
-        competitionName: selectedCompetition.name
+        competitionId: selectedCompetition?.id ?? 0,
+        competitionName: selectedCompetition?.name ?? 'Custom Matches',
+        matchSelectionMode: newGroupMatchMode,
+        customMatchDate: newGroupMatchMode === 'custom' ? newGroupCustomMatchDate : undefined,
+        customMatches: newGroupMatchMode === 'custom' ? newGroupCustomMatchIds : undefined
       });
 
       setGroups((prev) => [group, ...prev]);
       setSelectedGroupId(group.id);
       setNewGroupName('');
       setNewGroupCompetitionId('');
+      setNewGroupMatchMode('competition');
+      setNewGroupCustomMatchIds([]);
       setMessage('Group created.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create group.');
     } finally {
       setBusy(false);
     }
+  }
+
+  async function handleDeleteGroupById(group: AppGroup) {
+    if (!user) return;
+    const isOwner = group.owner_uid === user.uid;
+    if (!isOwner) {
+      setError('Only group owner can delete this group.');
+      return;
+    }
+    const confirmed = window.confirm(`Delete group "${group.name}"?\n\nThis action cannot be undone.`);
+    if (!confirmed) return;
+
+    try {
+      setGroupDeleting(true);
+      setError('');
+      await deleteGroup(group.id);
+      setGroups((prev) => prev.filter((row) => row.id !== group.id));
+      setSelectedGroupId((prev) => (prev === group.id ? '' : prev));
+      setMessage(`Group "${group.name}" deleted.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete group.');
+    } finally {
+      setGroupDeleting(false);
+    }
+  }
+
+  async function handleDeleteSelectedGroup() {
+    if (!selectedGroup) return;
+    await handleDeleteGroupById(selectedGroup);
+  }
+
+  function toggleNewGroupCustomMatch(matchId: number) {
+    setNewGroupCustomMatchIds((prev) => (prev.includes(matchId) ? prev.filter((id) => id !== matchId) : [...prev, matchId]));
+  }
+
+  function toggleSelectedGroupCustomMatch(match: Match) {
+    setGroupMatches((prev) => {
+      const exists = prev.some((item) => item.id === match.id);
+      if (exists) return prev.filter((item) => item.id !== match.id);
+      return [...prev, match].sort((a, b) => Date.parse(a.utcDate) - Date.parse(b.utcDate));
+    });
   }
 
   async function handleInvite() {
@@ -1849,45 +2035,6 @@ function App() {
     };
   }
 
-  async function handleSaveSinglePrediction(match: Match, isOpenForPrediction: boolean) {
-    if (!selectedGroup || !user) return;
-    if (!isOpenForPrediction) {
-      setMatchSaveState((prev) => ({
-        ...prev,
-        [match.id]: { status: 'error', note: 'Locked (kickoff started).' }
-      }));
-      return;
-    }
-    const draft = predictionDrafts[match.id];
-    if (!draft) {
-      setMatchSaveState((prev) => ({
-        ...prev,
-        [match.id]: { status: 'error', note: 'No draft changes.' }
-      }));
-      return;
-    }
-
-    const built = buildPredictionPayload(match, draft);
-    if ('error' in built) {
-      setMatchSaveState((prev) => ({
-        ...prev,
-        [match.id]: { status: 'error', note: built.error }
-      }));
-      return;
-    }
-
-    try {
-      setMatchSaveState((prev) => ({ ...prev, [match.id]: { status: 'saving', note: 'Saving...' } }));
-      setError('');
-      await savePrediction(built.payload);
-      await refreshGroupRealtimeData(selectedGroup, user.uid, leaderboardScope);
-      setMatchSaveState((prev) => ({ ...prev, [match.id]: { status: 'saved', note: 'Saved' } }));
-    } catch (err) {
-      const note = err instanceof Error ? err.message : 'Save failed.';
-      setMatchSaveState((prev) => ({ ...prev, [match.id]: { status: 'error', note } }));
-    }
-  }
-
   async function handleSaveAllPredictions() {
     if (!user || !selectedGroup) {
       return;
@@ -1899,10 +2046,6 @@ function App() {
     for (const match of groupMatches) {
       if (!isMatchOpenForPrediction(match, selectedGroup.prediction_lock_minutes)) {
         lockedMatches += 1;
-        setMatchSaveState((prev) => ({
-          ...prev,
-          [match.id]: { status: 'error', note: 'Locked (kickoff started).' }
-        }));
         continue;
       }
 
@@ -1932,31 +2075,9 @@ function App() {
     try {
       setSavingAll(true);
       setError('');
-      setMatchSaveState((prev) => {
-        const next = { ...prev };
-        for (const payload of payloads) {
-          next[payload.matchId] = { status: 'saving', note: 'Saving...' };
-        }
-        return next;
-      });
-
       const results = await Promise.allSettled(payloads.map((payload) => savePrediction(payload)));
       const successCount = results.filter((result) => result.status === 'fulfilled').length;
       const failCount = results.length - successCount;
-      setMatchSaveState((prev) => {
-        const next = { ...prev };
-        results.forEach((result, index) => {
-          const matchId = payloads[index]?.matchId;
-          if (!matchId) return;
-          if (result.status === 'fulfilled') {
-            next[matchId] = { status: 'saved', note: 'Saved' };
-            return;
-          }
-          const note = result.reason instanceof Error ? result.reason.message : 'Save failed.';
-          next[matchId] = { status: 'error', note };
-        });
-        return next;
-      });
       if (successCount === 0) {
         const firstError = results.find((result) => result.status === 'rejected');
         const message =
@@ -2004,8 +2125,12 @@ function App() {
   if (!authReady) {
     return (
       <div className="app">
-        <main className="layout">
-          <p>Loading authentication...</p>
+        <main className="auth-loading-screen">
+          <img
+            className="auth-loading-logo"
+            src={themeMode === 'dark' ? '/brand-logo-dark.svg' : '/brand-logo-light.svg'}
+            alt="predileague.com"
+          />
         </main>
       </div>
     );
@@ -2023,11 +2148,12 @@ function App() {
       <header className="topbar">
         <div className="topbar-inner">
           <div className="topbar-brand">
-            <span className="brand-mark" aria-hidden="true">
-              PL
-            </span>
+            <img
+              className="brand-logo"
+              src={themeMode === 'dark' ? '/brand-logo-dark.svg' : '/brand-logo-light.svg'}
+              alt="predileague.com - Predict Today. Top the League."
+            />
             <div className="topbar-meta">
-              <h1 className="topbar-title">PredictLeague</h1>
               <span className="topbar-sub">{headerContextLabel}</span>
             </div>
           </div>
@@ -2045,11 +2171,20 @@ function App() {
               className={`chip ${page === 'game' ? 'chip-active' : ''}`}
               onClick={() => goToPage('game')}
             >
-              Game
+              Let's Play
             </button>
           </nav>
 
           <div className="topbar-action">
+            <button
+              type="button"
+              className="chip theme-toggle"
+              onClick={() => setThemeMode((prev) => (prev === 'light' ? 'dark' : 'light'))}
+              aria-label={themeMode === 'light' ? 'Switch to dark theme' : 'Switch to light theme'}
+              title={themeMode === 'light' ? 'Switch to dark theme' : 'Switch to light theme'}
+            >
+              {themeMode === 'light' ? 'Dark' : 'Light'}
+            </button>
             {user ? (
               <div className="profile-menu-wrap" ref={profileMenuRef}>
                 <button
@@ -2104,6 +2239,11 @@ function App() {
             <div className="home-main">
               <section className="filter-panel">
                 <h2>Home Matches</h2>
+                <p className="muted">
+                  Explore today football match prediction insights, today match prediction picks, soccer predictions today,
+                  and prediction for today games. Build each prediction match in your group and join our world cup predictor
+                  game challenges.
+                </p>
                 <div className="date-box">
                   <div className="date-box-head">
                     <span className="box-label">Date</span>
@@ -2566,16 +2706,19 @@ function App() {
             <div className="game-side">
               <section className="filter-panel">
                 <h2>Create Group</h2>
-                <p className="muted">
-                  {isFreePlan
-                    ? `Free plan: ${groups.length}/${freeGroupLimit} group used.`
-                    : 'Pro plan: unlimited groups.'}
-                </p>
                 <div className="selectors">
                   <label>
                     Group Name
                     <input value={newGroupName} onChange={(e) => setNewGroupName(e.target.value)} placeholder="Weekend League" />
                   </label>
+                  <label>
+                    Match Source
+                    <select value={newGroupMatchMode} onChange={(e) => setNewGroupMatchMode(e.target.value === 'custom' ? 'custom' : 'competition')}>
+                      <option value="competition">Competition</option>
+                      <option value="custom">Custom Matches</option>
+                    </select>
+                  </label>
+                  {newGroupMatchMode === 'competition' ? (
                   <label>
                     Competition
                     <select value={newGroupCompetitionId} onChange={(e) => setNewGroupCompetitionId(e.target.value)}>
@@ -2587,15 +2730,85 @@ function App() {
                       ))}
                     </select>
                   </label>
+                  ) : (
+                    <label>
+                      Match Date
+                      <input type="date" value={newGroupCustomMatchDate} onChange={(e) => setNewGroupCustomMatchDate(e.target.value)} />
+                    </label>
+                  )}
                   <button
                     type="button"
                     className="refresh"
-                    disabled={busy || hasReachedFreeGroupLimit}
+                    disabled={busy}
                     onClick={() => void handleCreateGroup()}
                   >
-                    {hasReachedFreeGroupLimit ? 'Limit Reached' : 'Create'}
+                    Create
                   </button>
                 </div>
+                {newGroupMatchMode === 'custom' ? (
+                  <div className="invite-list">
+                    <p className="muted">
+                      Select one or more matches from any competition ({newGroupCustomMatchIds.length} selected).
+                    </p>
+                    <div className="selectors">
+                      <label>
+                        Competition Filter
+                        <select
+                          value={newGroupCustomCompetitionFilter}
+                          onChange={(e) => setNewGroupCustomCompetitionFilter(e.target.value)}
+                        >
+                          <option value="">All Competitions</option>
+                          {newGroupCustomCompetitionOptions.map((name) => (
+                            <option key={name} value={name}>
+                              {name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        Country Filter
+                        <select value={newGroupCustomCountryFilter} onChange={(e) => setNewGroupCustomCountryFilter(e.target.value)}>
+                          <option value="">All Countries</option>
+                          {newGroupCustomCountryOptions.map((name) => (
+                            <option key={name} value={name}>
+                              {name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                    {newGroupCustomPoolLoading ? <p className="muted">Loading matches...</p> : null}
+                    {!newGroupCustomPoolLoading && filteredNewGroupCustomPool.length === 0 ? (
+                      <p className="muted">No matches found for this date/filter.</p>
+                    ) : null}
+                    {filteredNewGroupCustomPool.map((match) => (
+                      <label key={match.id} className="group-custom-match-row">
+                        <input
+                          type="checkbox"
+                          checked={newGroupCustomMatchIds.includes(match.id)}
+                          onChange={() => toggleNewGroupCustomMatch(match.id)}
+                        />
+                        <span className="group-custom-match-card">
+                          <span className="group-custom-match-meta">
+                            <strong>{formatMatchDateTime(match.utcDate)}</strong>
+                            <em>{match.competition?.name ?? 'Competition'} · {match.competition?.area?.name ?? match.area?.name ?? 'Country'}</em>
+                          </span>
+                          <span className="group-custom-match-teams">
+                            <span className="team-name-wrap">
+                              {match.homeTeam.crest ? <img className="team-crest" src={match.homeTeam.crest} alt="" loading="lazy" /> : null}
+                              <span className="team-name">{match.homeTeam.name}</span>
+                            </span>
+                            <span className="group-custom-match-vs">vs</span>
+                            <span className="team-name-wrap">
+                              {match.awayTeam.crest ? <img className="team-crest" src={match.awayTeam.crest} alt="" loading="lazy" /> : null}
+                              <span className="team-name">{match.awayTeam.name}</span>
+                            </span>
+                          </span>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                ) : null}
               </section>
 
               <section className="filter-panel">
@@ -2603,14 +2816,30 @@ function App() {
                 <div className="group-list">
                   {groups.length === 0 ? <p className="muted">No groups yet. Create one above or accept an invite.</p> : null}
                   {groups.map((group) => (
-                    <button
-                      type="button"
+                    <div
                       key={group.id}
-                      className={`group-chip ${group.id === selectedGroupId ? 'group-chip-active' : ''}`}
-                      onClick={() => setSelectedGroupId(group.id)}
+                      className={`group-chip-row ${group.id === selectedGroupId ? 'group-chip-row-active' : ''}`}
                     >
-                      {group.name} - {group.competition_name}
-                    </button>
+                      <button
+                        type="button"
+                        className="group-chip group-chip-main"
+                        onClick={() => setSelectedGroupId(group.id)}
+                      >
+                        {group.name} - {group.match_selection_mode === 'custom' ? 'Custom Matches' : group.competition_name}
+                      </button>
+                      {user && group.owner_uid === user.uid ? (
+                        <button
+                          type="button"
+                          className="group-chip-delete"
+                          aria-label={`Delete ${group.name}`}
+                          title="Delete group"
+                          disabled={groupDeleting}
+                          onClick={() => void handleDeleteGroupById(group)}
+                        >
+                          X
+                        </button>
+                      ) : null}
+                    </div>
                   ))}
                 </div>
               </section>
@@ -2653,7 +2882,8 @@ function App() {
                   <h2>Fair Play Rules</h2>
                   <p className="muted">
                     Lock minutes before kickoff: <strong>{selectedGroup.prediction_lock_minutes}</strong> | Bonus rules:{' '}
-                    <strong>{selectedGroup.bonus_enabled ? 'On' : 'Off'}</strong>
+                    <strong>{selectedGroup.bonus_enabled ? 'On' : 'Off'}</strong> | Mode:{' '}
+                    <strong>{selectedGroup.match_selection_mode === 'custom' ? 'Custom Matches' : 'Competition'}</strong>
                   </p>
                   {isGroupOwner ? (
                     <>
@@ -2680,6 +2910,103 @@ function App() {
                         </label>
                         <button type="button" className="refresh" disabled={groupSettingsBusy} onClick={() => void handleSaveGroupSettings()}>
                           Save Rules
+                        </button>
+                      </div>
+
+                      {selectedGroup.match_selection_mode === 'custom' ? (
+                        <div className="custom-selection-panel">
+                          <div className="custom-selection-head">
+                            <strong>Custom Match Selection</strong>
+                            <span className="muted">Pick matches from any competition for today.</span>
+                          </div>
+                          <div className="quick-status custom-selection-stats">
+                            <span className="group-chip">Available: {filteredSelectedGroupCustomPool.length}</span>
+                            <span className="group-chip">Selected: {groupMatches.length}</span>
+                            <span className="group-chip">Stored: {selectedGroupCustomMatches.length}</span>
+                          </div>
+                          <div className="selectors">
+                            <label>
+                              Competition Filter
+                              <select
+                                value={selectedGroupCustomCompetitionFilter}
+                                onChange={(e) => setSelectedGroupCustomCompetitionFilter(e.target.value)}
+                              >
+                                <option value="">All Competitions</option>
+                                {selectedGroupCustomCompetitionOptions.map((name) => (
+                                  <option key={name} value={name}>
+                                    {name}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label>
+                              Country Filter
+                              <select
+                                value={selectedGroupCustomCountryFilter}
+                                onChange={(e) => setSelectedGroupCustomCountryFilter(e.target.value)}
+                              >
+                                <option value="">All Countries</option>
+                                {selectedGroupCustomCountryOptions.map((name) => (
+                                  <option key={name} value={name}>
+                                    {name}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          </div>
+                          <div className="custom-selection-list">
+                            {selectedGroupCustomPoolLoading ? <p className="muted">Loading available matches...</p> : null}
+                            {!selectedGroupCustomPoolLoading && filteredSelectedGroupCustomPool.length === 0 ? (
+                              <p className="muted">No available matches found for today/filter.</p>
+                            ) : null}
+                            {filteredSelectedGroupCustomPool.map((match) => (
+                              <label key={`custom-${match.id}`} className="group-custom-match-row">
+                                <input
+                                  type="checkbox"
+                                  checked={groupMatches.some((row) => row.id === match.id)}
+                                  onChange={() => toggleSelectedGroupCustomMatch(match)}
+                                />
+                                <span className="group-custom-match-card">
+                                  <span className="group-custom-match-meta">
+                                    <strong>{formatMatchDateTime(match.utcDate)}</strong>
+                                    <em>{match.competition?.name ?? 'Competition'} · {match.competition?.area?.name ?? match.area?.name ?? 'Country'}</em>
+                                  </span>
+                                  <span className="group-custom-match-teams">
+                                    <span className="team-name-wrap">
+                                      {match.homeTeam.crest ? <img className="team-crest" src={match.homeTeam.crest} alt="" loading="lazy" /> : null}
+                                      <span className="team-name">{match.homeTeam.name}</span>
+                                    </span>
+                                    <span className="group-custom-match-vs">vs</span>
+                                    <span className="team-name-wrap">
+                                      {match.awayTeam.crest ? <img className="team-crest" src={match.awayTeam.crest} alt="" loading="lazy" /> : null}
+                                      <span className="team-name">{match.awayTeam.name}</span>
+                                    </span>
+                                  </span>
+                                </span>
+                              </label>
+                            ))}
+                          </div>
+                          <div className="custom-selection-actions">
+                            <button
+                              type="button"
+                              className="refresh"
+                              disabled={groupSettingsBusy || customSelectionSaving}
+                              onClick={() => void handleSaveCustomSelection()}
+                            >
+                              {customSelectionSaving ? 'Saving Selection...' : 'Save Custom Selection'}
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+
+                      <div className="auth-actions">
+                        <button
+                          type="button"
+                          className="details-btn"
+                          disabled={groupDeleting || groupSettingsBusy}
+                          onClick={() => void handleDeleteSelectedGroup()}
+                        >
+                          {groupDeleting ? 'Deleting Group...' : 'Delete Group'}
                         </button>
                       </div>
 
@@ -2802,7 +3129,9 @@ function App() {
 
               {selectedGroup ? (
                 <section className="filter-panel game-summary">
-                  <h2>Prediction Board - {selectedGroup.competition_name}</h2>
+                  <h2>
+                    Prediction Board - {selectedGroup.match_selection_mode === 'custom' ? 'Custom Matches' : selectedGroup.competition_name}
+                  </h2>
                   <div className="quick-status">
                     <span className="group-chip">Matches: {groupMatches.length}</span>
                     <span className="group-chip">Completed Drafts: {completedDraftCount}</span>
@@ -2823,7 +3152,9 @@ function App() {
               {selectedGroup ? (
                 <section className="scoreboard">
                   <div className="scoreboard-head">
-                    <strong>Today Matches - {selectedGroup.competition_name}</strong>
+                    <strong>
+                      Today Matches - {selectedGroup.match_selection_mode === 'custom' ? 'Custom Matches' : selectedGroup.competition_name}
+                    </strong>
                     <span>{groupMatchesLoading ? 'Loading...' : `${groupMatches.length} match(es)`}</span>
                   </div>
 
@@ -2840,7 +3171,6 @@ function App() {
                       redCardPlayersHome: '',
                       redCardPlayersAway: ''
                     };
-                    const saved = myPredictions[match.id];
                     const matchPredictions = groupPredictionsByMatch[match.id] ?? [];
                     const isOpenForPrediction = isMatchOpenForPrediction(match, selectedGroup.prediction_lock_minutes);
                     const shouldReveal = !isOpenForPrediction;
@@ -2848,17 +3178,6 @@ function App() {
                     const realFtHome = match.score?.fullTime?.home ?? '-';
                     const realFtAway = match.score?.fullTime?.away ?? '-';
                     const matchLabel = `${match.homeTeam.name} vs ${match.awayTeam.name}`;
-                    const savedGoalSplit = splitTeamPlayerPicks(saved?.goal_players);
-                    const savedYellowSplit = splitTeamPlayerPicks(saved?.yellow_card_players);
-                    const savedRedSplit = splitTeamPlayerPicks(saved?.red_card_players);
-                    const isDraftComplete = [draft.htHome, draft.htAway, draft.ftHome, draft.ftAway].every((value) => value.trim() !== '');
-                    const draftDirty = isPredictionDraftDirty(draft, saved);
-                    const matchSave = matchSaveState[match.id];
-                    const kickoffMs = Date.parse(match.utcDate);
-                    const lockMs = Number.isFinite(kickoffMs)
-                      ? kickoffMs - Math.max(0, selectedGroup.prediction_lock_minutes ?? 0) * 60_000
-                      : NaN;
-                    const lockTimeLabel = Number.isFinite(lockMs) ? formatMatchDateTime(new Date(lockMs).toISOString()) : '';
                     const showEventResultState = match.status === 'FINISHED';
                     const goalPlayersHomeActual = incidentPlayersForTeam(match.incidents?.goals, match.homeTeam);
                     const goalPlayersAwayActual = incidentPlayersForTeam(match.incidents?.goals, match.awayTeam);
@@ -2965,8 +3284,16 @@ function App() {
                         <div className="prediction-events-board">
                           <div className="prediction-events-head">
                             <span />
-                            <strong>{match.homeTeam.tla ?? match.homeTeam.name}</strong>
-                            <strong>{match.awayTeam.tla ?? match.awayTeam.name}</strong>
+                            <span className="prediction-events-team-logo" title={match.homeTeam.name}>
+                              {match.homeTeam.crest ? (
+                                <img className="team-crest prediction-events-crest" src={match.homeTeam.crest} alt={match.homeTeam.name} loading="lazy" />
+                              ) : null}
+                            </span>
+                            <span className="prediction-events-team-logo" title={match.awayTeam.name}>
+                              {match.awayTeam.crest ? (
+                                <img className="team-crest prediction-events-crest" src={match.awayTeam.crest} alt={match.awayTeam.name} loading="lazy" />
+                              ) : null}
+                            </span>
                           </div>
 
                           <div className="prediction-event-row">
@@ -2974,7 +3301,6 @@ function App() {
                               ⚽
                             </span>
                             <div className="prediction-event-cell">
-                              <span className="prediction-event-team-tag">{match.homeTeam.tla ?? 'HOME'}</span>
                               <PlayerPicksInput
                                 compact
                                 label="⚽"
@@ -2993,7 +3319,6 @@ function App() {
                               />
                             </div>
                             <div className="prediction-event-cell">
-                              <span className="prediction-event-team-tag">{match.awayTeam.tla ?? 'AWAY'}</span>
                               <PlayerPicksInput
                                 compact
                                 label="⚽"
@@ -3015,10 +3340,9 @@ function App() {
 
                           <div className="prediction-event-row">
                             <span className="prediction-event-marker" title="Yellow Card">
-                              🟨
+                              <img className="prediction-event-icon" src="/yellow-card.png" alt="Yellow card" loading="lazy" />
                             </span>
                             <div className="prediction-event-cell">
-                              <span className="prediction-event-team-tag">{match.homeTeam.tla ?? 'HOME'}</span>
                               <PlayerPicksInput
                                 compact
                                 label="🟨"
@@ -3037,7 +3361,6 @@ function App() {
                               />
                             </div>
                             <div className="prediction-event-cell">
-                              <span className="prediction-event-team-tag">{match.awayTeam.tla ?? 'AWAY'}</span>
                               <PlayerPicksInput
                                 compact
                                 label="🟨"
@@ -3059,10 +3382,9 @@ function App() {
 
                           <div className="prediction-event-row">
                             <span className="prediction-event-marker" title="Red Card">
-                              🟥
+                              <img className="prediction-event-icon" src="/red-card.png" alt="Red card" loading="lazy" />
                             </span>
                             <div className="prediction-event-cell">
-                              <span className="prediction-event-team-tag">{match.homeTeam.tla ?? 'HOME'}</span>
                               <PlayerPicksInput
                                 compact
                                 label="🟥"
@@ -3081,7 +3403,6 @@ function App() {
                               />
                             </div>
                             <div className="prediction-event-cell">
-                              <span className="prediction-event-team-tag">{match.awayTeam.tla ?? 'AWAY'}</span>
                               <PlayerPicksInput
                                 compact
                                 label="🟥"
@@ -3101,50 +3422,10 @@ function App() {
                             </div>
                           </div>
                         </div>
-                        <div className="prediction-card-status">
-                          <span className={`prediction-draft-state ${draftDirty ? 'prediction-draft-dirty' : 'prediction-draft-clean'}`}>
-                            {draftDirty ? 'Unsaved changes' : saved ? 'Saved and synced' : 'No saved prediction yet'}
-                          </span>
-                          <button
-                            type="button"
-                            className="details-btn prediction-save-btn"
-                            disabled={!isOpenForPrediction || !isDraftComplete || !draftDirty || matchSave?.status === 'saving'}
-                            onClick={() => void handleSaveSinglePrediction(match, isOpenForPrediction)}
-                          >
-                            {matchSave?.status === 'saving' ? 'Saving...' : 'Save Match'}
-                          </button>
-                        </div>
-                        {matchSave?.note ? (
-                          <p className={`saved-line prediction-inline-note prediction-inline-note-${matchSave.status}`}>{matchSave.note}</p>
-                        ) : null}
-                        {saved ? (
-                          <p className="saved-line">
-                            Saved: HT {saved.ht_home}-{saved.ht_away} | FT {saved.ft_home}-{saved.ft_away}
-                          </p>
-                        ) : null}
-                        {saved?.goal_players?.length ? (
-                          <p className="saved-line">
-                            Goal picks: {match.homeTeam.tla ?? 'Home'} [{savedGoalSplit.home || '-'}] | {match.awayTeam.tla ?? 'Away'} [{savedGoalSplit.away || '-'}]
-                          </p>
-                        ) : null}
-                        {saved?.yellow_card_players?.length ? (
-                          <p className="saved-line">
-                            Yellow picks: {match.homeTeam.tla ?? 'Home'} [{savedYellowSplit.home || '-'}] | {match.awayTeam.tla ?? 'Away'} [{savedYellowSplit.away || '-'}]
-                          </p>
-                        ) : null}
-                        {saved?.red_card_players?.length ? (
-                          <p className="saved-line">
-                            Red picks: {match.homeTeam.tla ?? 'Home'} [{savedRedSplit.home || '-'}] | {match.awayTeam.tla ?? 'Away'} [{savedRedSplit.away || '-'}]
-                          </p>
-                        ) : null}
                         {!isOpenForPrediction ? (
-                          <p className="saved-line">
-                            Predictions locked for this match{lockTimeLabel ? ` (lock time: ${lockTimeLabel})` : ''}.
+                          <p className="saved-line prediction-lock-alert">
+                            Predictions locked for this match.
                           </p>
-                        ) : null}
-                        {isOpenForPrediction && lockTimeLabel ? <p className="saved-line">Lock time: {lockTimeLabel}</p> : null}
-                        {saved && !shouldReveal ? (
-                          <p className="saved-line">Predictions are private until lock time.</p>
                         ) : null}
                         {shouldReveal ? (
                           <div className="reveal-list">
@@ -3214,43 +3495,6 @@ function App() {
               </article>
             ) : (
               <>
-                <section className="filter-panel profile-card subscription-card">
-                  <h2>Plan & Billing</h2>
-                  {billingLoading ? <p className="muted">Loading billing status...</p> : null}
-                  <div className="points-list">
-                    <p>
-                      Current plan: <strong>{billingStatus?.tier === 'pro' ? 'Pro' : 'Free'}</strong>
-                    </p>
-                    <p>
-                      Billing status: <strong>{billingStatus?.status ?? 'inactive'}</strong>
-                    </p>
-                    {billingStatus?.proExpiresAt ? (
-                      <p>
-                        Pro expires at: <strong>{formatMatchDateTime(billingStatus.proExpiresAt)}</strong>
-                      </p>
-                    ) : null}
-                    <p className="muted">Free plan can create 1 group. Pro unlocks unlimited groups.</p>
-                  </div>
-                  <div className="auth-actions">
-                    {billingStatus?.tier !== 'pro' ? (
-                      <button
-                        type="button"
-                        className="refresh"
-                        disabled={billingBusy || billingLoading || !billingStatus?.paypalConfigured}
-                        onClick={() => void handleUpgradeToPro()}
-                      >
-                        {billingBusy ? 'Redirecting...' : 'Upgrade To Pro ($4.99/mo)'}
-                      </button>
-                    ) : null}
-                    {!billingStatus?.paypalConfigured ? (
-                      <p className="muted">PayPal is not configured yet. Add PAYPAL credentials in server .env.</p>
-                    ) : null}
-                    {billingStatus?.paypalConfigured ? (
-                      <p className="muted">Payment gateway: PayPal ({billingStatus.paypalMode})</p>
-                    ) : null}
-                  </div>
-                </section>
-
                 <section className="filter-panel profile-card">
                   <h2>Your Profile</h2>
                   {profileLoading ? <p className="muted">Loading profile...</p> : null}
@@ -3614,7 +3858,7 @@ function App() {
         ) : null}
 
         {error ? <p className="error">{error}</p> : null}
-        {message ? <p className="muted">{message}</p> : null}
+        {message ? <p className="status-message">{message}</p> : null}
         {busy ? <p className="muted">Working...</p> : null}
       </main>
       <footer className="app-footer">

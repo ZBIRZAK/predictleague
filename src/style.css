@@ -1,17 +1,80 @@
 @import url('https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;700&family=Teko:wght@500;600&display=swap');
 
 :root {
+  --bg-main: #edf2f8;
+  --bg-panel: #ffffff;
+  --bg-card: #f8fbff;
+  --line: #d3ddeb;
+  --text-main: #121a27;
+  --text-soft: #62748d;
+  --accent: #009220;
+  --accent-2: #ff8d3a;
+  --green: #2ecf6e;
+  --red: #ff4a4a;
+  --yellow: #f6bf2f;
+  --body-glow: #dfe9f8;
+  --topbar-border: rgba(128, 146, 176, 0.35);
+  --topbar-grad-a: rgba(255, 255, 255, 0.97);
+  --topbar-grad-b: rgba(241, 246, 253, 0.95);
+  --topbar-shadow: rgba(15, 23, 42, 0.14);
+  --topbar-sub: #5c6f89;
+  --nav-border: #c7d3e3;
+  --nav-bg: rgba(235, 242, 251, 0.9);
+  --input-bg: #ffffff;
+  --chip-bg: #eef3f9;
+  --hover-bg: rgba(20, 31, 49, 0.04);
+  --menu-bg: #ffffff;
+  --menu-border: #d2deed;
+  --menu-text: #142034;
+  --footer-bg: rgba(241, 246, 253, 0.94);
+  --footer-border: rgba(128, 146, 176, 0.3);
+  --footer-text: #6c7f99;
+  --panel-head-bg: linear-gradient(120deg, #eef4fb, #e7eef8);
+  --row-border: rgba(160, 177, 205, 0.55);
+  --auth-hero-bg: radial-gradient(circle at 20% 20%, rgba(255, 141, 58, 0.18) 0, transparent 42%), linear-gradient(150deg, #f4f8ff 0%, #eaf1fb 100%);
+  --auth-divider-line: rgba(127, 149, 183, 0.4);
+  --status-message-bg: rgba(10, 146, 48, 0.1);
+  --status-message-border: rgba(10, 146, 48, 0.35);
+  --status-message-text: #13612a;
+  --error-bg: rgba(214, 28, 42, 0.1);
+  --error-border: rgba(214, 28, 42, 0.35);
+  --error-text: #8f1322;
+}
+
+:root[data-theme='dark'] {
   --bg-main: #101826;
   --bg-panel: #182132;
   --bg-card: #212c40;
   --line: #2d3851;
   --text-main: #f4f8ff;
   --text-soft: #a7b6d2;
-  --accent: #009220;
-  --accent-2: #ff8d3a;
-  --green: #2ecf6e;
-  --red: #ff4a4a;
-  --yellow: #f6bf2f;
+  --body-glow: #1e2c46;
+  --topbar-border: rgba(114, 144, 194, 0.2);
+  --topbar-grad-a: rgba(10, 17, 29, 0.96);
+  --topbar-grad-b: rgba(14, 25, 40, 0.95);
+  --topbar-shadow: rgba(4, 8, 14, 0.34);
+  --topbar-sub: #b9c8e0;
+  --nav-border: rgba(92, 113, 148, 0.35);
+  --nav-bg: rgba(16, 25, 40, 0.76);
+  --input-bg: #263147;
+  --chip-bg: #25314a;
+  --hover-bg: rgba(255, 255, 255, 0.03);
+  --menu-bg: #0e1a2a;
+  --menu-border: rgba(103, 130, 173, 0.4);
+  --menu-text: #e8f1ff;
+  --footer-bg: rgba(9, 15, 25, 0.72);
+  --footer-border: rgba(97, 118, 156, 0.22);
+  --footer-text: #9fb1d0;
+  --panel-head-bg: linear-gradient(120deg, #202f47, #1a2437);
+  --row-border: rgba(45, 56, 81, 0.75);
+  --auth-hero-bg: radial-gradient(circle at 20% 20%, rgba(255, 141, 58, 0.24) 0, transparent 42%), linear-gradient(150deg, #1a2940 0%, #172334 100%);
+  --auth-divider-line: rgba(167, 182, 210, 0.35);
+  --status-message-bg: rgba(46, 207, 110, 0.16);
+  --status-message-border: rgba(46, 207, 110, 0.42);
+  --status-message-text: #cbf7d9;
+  --error-bg: rgba(255, 74, 74, 0.15);
+  --error-border: rgba(255, 74, 74, 0.45);
+  --error-text: #ffdcdc;
 }
 
 * {
@@ -21,7 +84,7 @@
 body {
   margin: 0;
   font-family: 'Rubik', sans-serif;
-  background: radial-gradient(circle at 12% 8%, #1e2c46 0%, var(--bg-main) 42%);
+  background: radial-gradient(circle at 12% 8%, var(--body-glow) 0%, var(--bg-main) 42%);
   color: var(--text-main);
 }
 
@@ -33,12 +96,12 @@ body {
   position: sticky;
   top: 0;
   z-index: 20;
-  border-bottom: 1px solid rgba(114, 144, 194, 0.2);
+  border-bottom: 1px solid var(--topbar-border);
   background:
-    linear-gradient(90deg, rgba(10, 17, 29, 0.96) 0%, rgba(14, 25, 40, 0.95) 100%),
+    linear-gradient(90deg, var(--topbar-grad-a) 0%, var(--topbar-grad-b) 100%),
     linear-gradient(180deg, rgba(255, 255, 255, 0.02) 0%, transparent 100%);
   backdrop-filter: blur(12px);
-  box-shadow: 0 10px 24px rgba(4, 8, 14, 0.34);
+  box-shadow: 0 10px 24px var(--topbar-shadow);
 }
 
 .topbar-inner {
@@ -56,22 +119,15 @@ body {
   grid-area: brand;
   display: flex;
   align-items: center;
-  gap: 0.6rem;
+  gap: 0.45rem;
   min-width: 0;
 }
 
-.brand-mark {
-  width: 40px;
-  height: 40px;
-  border-radius: 12px;
-  display: grid;
-  place-items: center;
-  background: linear-gradient(145deg, #029220 0%, #21f24c 100%);
-  color: #fff;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  font-size: 0.86rem;
-  box-shadow: 0 10px 24px rgb(29 255 27 / 28%);
+.brand-logo {
+  width: clamp(150px, 18vw, 235px);
+  height: auto;
+  display: block;
+  border-radius: 0;
 }
 
 .topbar-meta {
@@ -79,16 +135,8 @@ body {
   min-width: 0;
 }
 
-.topbar-title {
-  margin: 0;
-  font-family: 'Teko', sans-serif;
-  font-size: 1.86rem;
-  letter-spacing: 0.03em;
-  line-height: 1;
-}
-
 .topbar-sub {
-  color: #b9c8e0;
+  color: var(--topbar-sub);
   font-size: 0.72rem;
   font-weight: 500;
   letter-spacing: 0.12em;
@@ -101,9 +149,9 @@ body {
   justify-content: center;
   gap: 0.5rem;
   padding: 0.2rem;
-  border: 1px solid rgba(92, 113, 148, 0.35);
+  border: 1px solid var(--nav-border);
   border-radius: 999px;
-  background: rgba(16, 25, 40, 0.76);
+  background: var(--nav-bg);
 }
 
 .topbar-nav .chip {
@@ -130,6 +178,12 @@ body {
   position: relative;
 }
 
+.theme-toggle {
+  min-height: 36px;
+  min-width: 74px;
+  font-weight: 600;
+}
+
 .topbar-context {
   color: var(--text-soft);
   font-size: 0.76rem;
@@ -149,9 +203,9 @@ body {
   gap: 0.5rem;
   min-height: 36px;
   border-radius: 999px;
-  border: 1px solid rgba(108, 136, 181, 0.45);
-  background: rgba(11, 20, 34, 0.86);
-  color: #eff5ff;
+  border: 1px solid var(--nav-border);
+  background: var(--nav-bg);
+  color: var(--text-main);
   padding: 0.24rem 0.5rem 0.24rem 0.3rem;
   cursor: pointer;
 }
@@ -177,8 +231,8 @@ body {
   gap: 0.15rem;
   padding: 0.35rem;
   border-radius: 12px;
-  border: 1px solid rgba(103, 130, 173, 0.4);
-  background: #0e1a2a;
+  border: 1px solid var(--menu-border);
+  background: var(--menu-bg);
   box-shadow: 0 14px 28px rgba(4, 8, 14, 0.44);
   z-index: 30;
 }
@@ -189,14 +243,14 @@ body {
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: #e8f1ff;
+  color: var(--menu-text);
   padding: 0.5rem 0.6rem;
   font-size: 0.82rem;
   cursor: pointer;
 }
 
 .profile-menu-item:hover {
-  background: rgba(48, 71, 108, 0.45);
+  background: var(--hover-bg);
 }
 
 .profile-menu-item-danger {
@@ -205,8 +259,8 @@ body {
 
 .app-footer {
   margin-top: 1rem;
-  border-top: 1px solid rgba(97, 118, 156, 0.22);
-  background: rgba(9, 15, 25, 0.72);
+  border-top: 1px solid var(--footer-border);
+  background: var(--footer-bg);
 }
 
 .app-footer-inner {
@@ -217,7 +271,7 @@ body {
 
 .app-footer p {
   margin: 0;
-  color: #9fb1d0;
+  color: var(--footer-text);
   font-size: 0.78rem;
   text-align: center;
 }
@@ -227,6 +281,19 @@ body {
   margin: 1rem auto;
   display: grid;
   gap: 0.9rem;
+}
+
+.auth-loading-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+
+.auth-loading-logo {
+  width: min(82vw, 420px);
+  height: auto;
+  display: block;
 }
 
 .home-grid {
@@ -289,7 +356,7 @@ body {
 
 .chip {
   border: 1px solid var(--line);
-  background: #25314a;
+  background: var(--chip-bg);
   color: var(--text-soft);
   padding: 0.35rem 0.8rem;
   border-radius: 999px;
@@ -325,7 +392,7 @@ textarea,
 .modal-header button {
   border-radius: 8px;
   border: 1px solid var(--line);
-  background: #263147;
+  background: var(--input-bg);
   color: var(--text-main);
   min-height: 38px;
   padding: 0 0.7rem;
@@ -365,9 +432,18 @@ textarea {
 
 .error {
   margin: 0;
-  border: 1px solid rgba(255, 74, 74, 0.45);
-  background: rgba(255, 74, 74, 0.15);
-  color: #ffdcdc;
+  border: 1px solid var(--error-border);
+  background: var(--error-bg);
+  color: var(--error-text);
+  border-radius: 10px;
+  padding: 0.65rem;
+}
+
+.status-message {
+  margin: 0;
+  border: 1px solid var(--status-message-border);
+  background: var(--status-message-bg);
+  color: var(--status-message-text);
   border-radius: 10px;
   padding: 0.65rem;
 }
@@ -387,7 +463,7 @@ textarea {
 .league-head {
   padding: 0.7rem 0.85rem;
   border-bottom: 1px solid var(--line);
-  background: linear-gradient(120deg, #202f47, #1a2437);
+  background: var(--panel-head-bg);
 }
 
 .league-head h2 {
@@ -410,7 +486,7 @@ textarea {
   grid-template-columns: 110px 1fr 90px;
   gap: 0.6rem;
   padding: 0.65rem 0.85rem;
-  border-top: 1px solid rgba(45, 56, 81, 0.75);
+  border-top: 1px solid var(--row-border);
   align-items: center;
 }
 
@@ -419,7 +495,7 @@ textarea {
 }
 
 .match-row-clickable:hover {
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--hover-bg);
 }
 
 .match-row-clickable:focus-visible {
@@ -648,9 +724,7 @@ textarea {
   border: 1px solid var(--line);
   border-radius: 14px;
   padding: 1rem;
-  background:
-    radial-gradient(circle at 20% 20%, rgba(255, 141, 58, 0.24) 0, transparent 42%),
-    linear-gradient(150deg, #1a2940 0%, #172334 100%);
+  background: var(--auth-hero-bg);
   display: grid;
   align-content: center;
   gap: 0.4rem;
@@ -709,7 +783,7 @@ textarea {
   content: '';
   flex: 1;
   height: 1px;
-  background: rgba(167, 182, 210, 0.35);
+  background: var(--auth-divider-line);
 }
 
 .auth-google {
@@ -720,6 +794,7 @@ textarea {
 .auth-hint {
   margin: -0.2rem 0 0;
   font-size: 0.76rem;
+  color: var(--text-soft);
 }
 
 .profile-shell {
@@ -753,13 +828,48 @@ textarea {
   gap: 0.45rem;
 }
 
-.group-chip {
+.group-chip-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
   border: 1px solid var(--line);
   background: #25314a;
-  color: var(--text-main);
   border-radius: 999px;
-  padding: 0.4rem 0.8rem;
+  padding: 0.16rem 0.2rem 0.16rem 0.58rem;
+}
+
+.group-chip-row-active {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.group-chip {
+  border: 0;
+  background: transparent;
+  color: var(--text-main);
+  border-radius: 0;
+  padding: 0;
   cursor: pointer;
+}
+
+.group-chip-main {
+  padding: 0.24rem 0.14rem 0.24rem 0;
+}
+
+.group-chip-delete {
+  min-height: 22px;
+  min-width: 22px;
+  border: 1px solid rgba(255, 99, 99, 0.45);
+  border-radius: 999px;
+  background: rgba(120, 12, 12, 0.45);
+  color: #ffd6d6;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  line-height: 1;
+  padding: 0;
+  font-size: 0.72rem;
+  font-weight: 700;
 }
 
 .group-chip-active {
@@ -783,6 +893,101 @@ textarea {
   margin: 0;
   color: var(--text-soft);
   font-size: 0.88rem;
+}
+
+.group-custom-match-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.5rem;
+  align-items: start;
+  font-size: 0.82rem;
+  color: #dce8ff;
+  padding: 0.4rem 0.45rem;
+  border: 1px solid rgba(102, 126, 166, 0.24);
+  border-radius: 10px;
+  background: rgba(19, 30, 47, 0.55);
+}
+
+.group-custom-match-row input[type='checkbox'] {
+  margin-top: 0.2rem;
+}
+
+.group-custom-match-card {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.group-custom-match-meta {
+  display: grid;
+  gap: 0.05rem;
+}
+
+.group-custom-match-meta strong {
+  color: #eef5ff;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.group-custom-match-meta em {
+  color: #9eb3d3;
+  font-style: normal;
+  font-size: 0.72rem;
+}
+
+.group-custom-match-teams {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.group-custom-match-teams .team-name-wrap {
+  min-width: 0;
+}
+
+.group-custom-match-vs {
+  color: #9eb3d3;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.custom-selection-panel {
+  margin-top: 0.2rem;
+  border: 1px solid rgba(102, 126, 166, 0.28);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(19, 31, 49, 0.72), rgba(13, 22, 36, 0.55));
+  padding: 0.6rem;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.custom-selection-head {
+  display: grid;
+  gap: 0.12rem;
+}
+
+.custom-selection-head strong {
+  font-size: 0.9rem;
+  letter-spacing: 0.01em;
+}
+
+.custom-selection-stats {
+  gap: 0.4rem;
+}
+
+.custom-selection-list {
+  display: grid;
+  gap: 0.35rem;
+  max-height: 220px;
+  overflow-y: auto;
+  padding-right: 0.1rem;
+}
+
+.custom-selection-actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .points-guide {
@@ -939,7 +1144,7 @@ textarea {
 
 .prediction-events-head {
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: 44px minmax(0, 1fr) minmax(0, 1fr);
   gap: 0.35rem;
   align-items: center;
 }
@@ -952,9 +1157,20 @@ textarea {
   text-align: center;
 }
 
+.prediction-events-team-logo {
+  display: grid;
+  place-items: center;
+  min-height: 20px;
+}
+
+.prediction-events-crest {
+  width: 30px;
+  height: 30px;
+}
+
 .prediction-event-row {
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: 44px minmax(0, 1fr) minmax(0, 1fr);
   gap: 0.35rem;
   align-items: start;
 }
@@ -964,24 +1180,22 @@ textarea {
   gap: 0.18rem;
 }
 
-.prediction-event-team-tag {
-  font-size: 0.64rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: #9fb7d8;
-  font-weight: 700;
-  padding-left: 0.12rem;
-}
-
 .prediction-event-marker {
-  width: 30px;
-  min-height: 34px;
+  width: 44px;
+  min-height: 50px;
   border-radius: 8px;
   border: 1px solid rgba(79, 104, 146, 0.24);
   background: rgba(25, 38, 60, 0.58);
   display: grid;
   place-items: center;
   font-size: 0.92rem;
+}
+
+.prediction-event-icon {
+  width: 28px;
+  height: 36px;
+  object-fit: contain;
+  display: block;
 }
 
 .prediction-ht-row {
@@ -1155,6 +1369,15 @@ textarea {
   padding: 0 0.85rem 0.65rem;
   color: var(--text-soft);
   font-size: 0.85rem;
+}
+
+.prediction-lock-alert {
+  margin: 0.2rem 0.85rem 0.7rem;
+  padding: 0.58rem 0.68rem;
+  border: 1px solid rgba(255, 74, 74, 0.62);
+  border-radius: 10px;
+  background: rgba(255, 74, 74, 0.14);
+  color: #ffdede;
 }
 
 .prediction-card-status {
@@ -1606,6 +1829,93 @@ textarea {
 
 .muted {
   color: var(--text-soft);
+  display: none;
+}
+
+:root:not([data-theme='dark']) .important-panel {
+  background: linear-gradient(110deg, #edf7f1 0%, #eef4fb 52%, #eaf0f8 100%);
+  border-color: #c3d7ea;
+}
+
+:root:not([data-theme='dark']) .important-feature-card {
+  background: linear-gradient(90deg, #f4fbf7 0%, #f1f5fb 50%, #edf3fa 100%);
+  color: var(--text-main);
+}
+
+:root:not([data-theme='dark']) .important-row,
+:root:not([data-theme='dark']) .details-btn,
+:root:not([data-theme='dark']) .group-chip-row,
+:root:not([data-theme='dark']) .group-custom-match-row,
+:root:not([data-theme='dark']) .custom-selection-panel,
+:root:not([data-theme='dark']) .prediction-scoreboard,
+:root:not([data-theme='dark']) .prediction-event-marker,
+:root:not([data-theme='dark']) .player-picks-head,
+:root:not([data-theme='dark']) .event-pick-group,
+:root:not([data-theme='dark']) .player-picks-box,
+:root:not([data-theme='dark']) .player-pick-chip,
+:root:not([data-theme='dark']) .player-pick-chip button,
+:root:not([data-theme='dark']) .leaderboard-card,
+:root:not([data-theme='dark']) .leaderboard-points,
+:root:not([data-theme='dark']) .reveal-card,
+:root:not([data-theme='dark']) .standings-table,
+:root:not([data-theme='dark']) .standings-table th,
+:root:not([data-theme='dark']) .scorer-row,
+:root:not([data-theme='dark']) .scorer-goals,
+:root:not([data-theme='dark']) .modal,
+:root:not([data-theme='dark']) .player-row {
+  background: #ffffff;
+  color: var(--text-main);
+}
+
+:root:not([data-theme='dark']) .group-custom-match-row,
+:root:not([data-theme='dark']) .custom-selection-panel,
+:root:not([data-theme='dark']) .prediction-scoreboard,
+:root:not([data-theme='dark']) .prediction-event-marker,
+:root:not([data-theme='dark']) .player-picks-head,
+:root:not([data-theme='dark']) .event-pick-group,
+:root:not([data-theme='dark']) .player-picks-box,
+:root:not([data-theme='dark']) .standings-table th,
+:root:not([data-theme='dark']) .standings-table td,
+:root:not([data-theme='dark']) .scorers-block,
+:root:not([data-theme='dark']) .prediction-events-board {
+  border-color: #d6dfec;
+}
+
+:root:not([data-theme='dark']) .prediction-score-core {
+  border-left-color: #d6dfec;
+  border-right-color: #d6dfec;
+}
+
+:root:not([data-theme='dark']) .prediction-real-result,
+:root:not([data-theme='dark']) .group-custom-match-meta strong,
+:root:not([data-theme='dark']) .prediction-events-head strong,
+:root:not([data-theme='dark']) .prediction-ht-label,
+:root:not([data-theme='dark']) .player-picks-empty {
+  color: #1f2f46;
+}
+
+:root:not([data-theme='dark']) .prediction-score-tag,
+:root:not([data-theme='dark']) .group-custom-match-meta em,
+:root:not([data-theme='dark']) .group-custom-match-vs {
+  color: #6b7f9b;
+}
+
+:root:not([data-theme='dark']) .modal-overlay {
+  background: rgba(18, 32, 52, 0.25);
+}
+
+:root:not([data-theme='dark']) .standings-table tr td {
+  border-bottom-color: #d6dfec;
+}
+
+:root:not([data-theme='dark']) .match-row {
+  border-top-color: #d6dfec;
+}
+
+:root:not([data-theme='dark']) .pitch-player {
+  border-color: #b9d7c4;
+  background: rgba(248, 255, 251, 0.9);
+  color: #1a4b2b;
 }
 
 @media (max-width: 1024px) {
@@ -1662,17 +1972,6 @@ textarea {
     gap: 0.5rem;
   }
 
-  .brand-mark {
-    width: 34px;
-    height: 34px;
-    border-radius: 10px;
-    font-size: 0.78rem;
-  }
-
-  .topbar-title {
-    font-size: 1.55rem;
-  }
-
   .topbar-sub {
     font-size: 0.67rem;
   }
@@ -1716,6 +2015,29 @@ textarea {
   .selectors {
     grid-template-columns: 1fr;
     gap: 0.5rem;
+  }
+
+  .custom-selection-panel {
+    padding: 0.52rem;
+    gap: 0.48rem;
+  }
+
+  .custom-selection-list {
+    max-height: 260px;
+  }
+
+  .custom-selection-actions .refresh {
+    width: 100%;
+  }
+
+  .group-custom-match-teams {
+    grid-template-columns: 1fr;
+    gap: 0.18rem;
+    align-items: start;
+  }
+
+  .group-custom-match-vs {
+    display: none;
   }
 
   input,
@@ -1846,7 +2168,7 @@ textarea {
 
   .prediction-events-head,
   .prediction-event-row {
-    grid-template-columns: 24px minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-columns: 34px minmax(0, 1fr) minmax(0, 1fr);
   }
 
   .player-picks {
@@ -1935,11 +2257,7 @@ textarea {
 
   .prediction-events-head,
   .prediction-event-row {
-    grid-template-columns: 24px minmax(0, 1fr) minmax(0, 1fr);
-  }
-
-  .prediction-event-team-tag {
-    font-size: 0.62rem;
+    grid-template-columns: 34px minmax(0, 1fr) minmax(0, 1fr);
   }
 }
 
@@ -1962,6 +2280,8 @@ textarea {
 
   .topbar-brand {
     justify-content: center;
+    flex-direction: column;
+    gap: 0.25rem;
   }
 
   .topbar-meta {
@@ -1977,8 +2297,8 @@ textarea {
     max-width: 72vw;
   }
 
-  .topbar-title {
-    font-size: 1.42rem;
+  .brand-logo {
+    width: min(72vw, 260px);
   }
 
   .topbar-sub {

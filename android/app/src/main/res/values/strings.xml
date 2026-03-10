@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">predictleague</string>
+    <string name="title_activity_main">predictleague</string>
+    <string name="package_name">com.predictleague.app</string>
+    <string name="custom_url_scheme">com.predictleague.app</string>
+</resources>

@@ -6,6 +6,7 @@ create table if not exists public.groups (
   name text not null,
   competition_id integer not null,
   competition_name text not null,
+  match_selection_mode text not null default 'competition' check (match_selection_mode in ('competition', 'custom')),
   owner_uid text not null,
   prediction_lock_minutes integer not null default 5 check (prediction_lock_minutes >= 0 and prediction_lock_minutes <= 180),
   bonus_enabled boolean not null default false,
@@ -70,6 +71,17 @@ create table if not exists public.group_match_bonus (
 
 create index if not exists idx_group_match_bonus_group on public.group_match_bonus(group_id, active);
 
+create table if not exists public.group_custom_matches (
+  group_id uuid not null references public.groups(id) on delete cascade,
+  match_id integer not null,
+  match_date date not null,
+  added_by_uid text not null,
+  created_at timestamptz not null default now(),
+  primary key (group_id, match_id)
+);
+
+create index if not exists idx_group_custom_matches_group_date on public.group_custom_matches(group_id, match_date);
+
 create table if not exists public.prediction_points_snapshots (
   id uuid primary key default gen_random_uuid(),
   group_id uuid not null references public.groups(id) on delete cascade,
@@ -117,12 +129,20 @@ create table if not exists public.user_profiles (
 -- "create table if not exists" does not add new columns to already-created tables.
 alter table public.groups add column if not exists prediction_lock_minutes integer;
 alter table public.groups add column if not exists bonus_enabled boolean;
+alter table public.groups add column if not exists match_selection_mode text;
 update public.groups set prediction_lock_minutes = 5 where prediction_lock_minutes is null;
 update public.groups set bonus_enabled = false where bonus_enabled is null;
+update public.groups set match_selection_mode = 'competition' where match_selection_mode is null;
 alter table public.groups alter column prediction_lock_minutes set default 5;
 alter table public.groups alter column bonus_enabled set default false;
+alter table public.groups alter column match_selection_mode set default 'competition';
 alter table public.groups alter column prediction_lock_minutes set not null;
 alter table public.groups alter column bonus_enabled set not null;
+alter table public.groups alter column match_selection_mode set not null;
+alter table public.groups drop constraint if exists groups_match_selection_mode_check;
+alter table public.groups
+  add constraint groups_match_selection_mode_check
+  check (match_selection_mode in ('competition', 'custom'));
 
 alter table public.predictions add column if not exists match_kickoff_at timestamptz;
 alter table public.predictions add column if not exists lock_at timestamptz;
@@ -173,6 +193,7 @@ alter table public.group_invites enable row level security;
 alter table public.predictions enable row level security;
 alter table public.user_profiles enable row level security;
 alter table public.group_match_bonus enable row level security;
+alter table public.group_custom_matches enable row level security;
 alter table public.prediction_points_snapshots enable row level security;
 
 create or replace function public.block_locked_prediction_updates()
@@ -255,6 +276,13 @@ drop policy if exists "group_match_bonus_block_update" on public.group_match_bon
 create policy "group_match_bonus_block_select" on public.group_match_bonus for select using (false);
 create policy "group_match_bonus_block_insert" on public.group_match_bonus for insert with check (false);
 create policy "group_match_bonus_block_update" on public.group_match_bonus for update using (false) with check (false);
+
+drop policy if exists "group_custom_matches_block_select" on public.group_custom_matches;
+drop policy if exists "group_custom_matches_block_insert" on public.group_custom_matches;
+drop policy if exists "group_custom_matches_block_update" on public.group_custom_matches;
+create policy "group_custom_matches_block_select" on public.group_custom_matches for select using (false);
+create policy "group_custom_matches_block_insert" on public.group_custom_matches for insert with check (false);
+create policy "group_custom_matches_block_update" on public.group_custom_matches for update using (false) with check (false);
 
 drop policy if exists "prediction_points_snapshots_block_select" on public.prediction_points_snapshots;
 drop policy if exists "prediction_points_snapshots_block_insert" on public.prediction_points_snapshots;

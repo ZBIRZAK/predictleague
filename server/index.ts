@@ -20,16 +20,8 @@ const firebaseWebApiKey = process.env.FIREBASE_WEB_API_KEY ?? process.env.VITE_F
 const isProd = process.env.NODE_ENV === 'production';
 const supabaseUrl = process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? '';
 const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
-const paypalClientId = process.env.PAYPAL_CLIENT_ID ?? '';
-const paypalClientSecret = process.env.PAYPAL_CLIENT_SECRET ?? '';
-const paypalMode = (process.env.PAYPAL_MODE ?? 'sandbox').toLowerCase() === 'live' ? 'live' : 'sandbox';
-const paypalPlanPriceUsd = Number(process.env.PAYWALL_PRO_PRICE_USD ?? 4.99);
-const appBaseUrl = process.env.APP_BASE_URL ?? 'http://localhost:5173';
-const freeMaxOwnedGroups = Number(process.env.FREE_MAX_OWNED_GROUPS ?? 1);
 const footballDataApiKey = process.env.FOOTBALL_DATA_API_KEY ?? '';
 const footballDataApiBase = 'https://api.football-data.org';
-const paypalApiBase =
-  paypalMode === 'live' ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com';
 
 const mailer =
   smtpUser && smtpPass
@@ -1471,41 +1463,6 @@ function requireSupabaseAdmin(res: express.Response) {
   return supabaseAdmin;
 }
 
-function hasPayPalConfig() {
-  return Boolean(paypalClientId && paypalClientSecret);
-}
-
-async function getPayPalAccessToken() {
-  const auth = Buffer.from(`${paypalClientId}:${paypalClientSecret}`).toString('base64');
-  const response = await fetch(`${paypalApiBase}/v1/oauth2/token`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Basic ${auth}`,
-      'Content-Type': 'application/x-www-form-urlencoded'
-    },
-    body: 'grant_type=client_credentials'
-  });
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => ({}))) as { error_description?: string };
-    throw new Error(payload.error_description ?? 'Failed to authenticate with PayPal.');
-  }
-  const payload = (await response.json()) as { access_token: string };
-  return payload.access_token;
-}
-
-async function paypalRequest(pathname: string, options: RequestInit = {}) {
-  if (!hasPayPalConfig()) {
-    throw new Error('PayPal is not configured on server.');
-  }
-  const token = await getPayPalAccessToken();
-  const headers = new Headers(options.headers);
-  headers.set('Authorization', `Bearer ${token}`);
-  if (options.body && !headers.has('Content-Type')) {
-    headers.set('Content-Type', 'application/json');
-  }
-  return fetch(`${paypalApiBase}${pathname}`, { ...options, headers });
-}
-
 async function loadGroupMembership(groupId: string, userUid: string) {
   if (!supabaseAdmin) {
     return null;
@@ -1684,6 +1641,49 @@ async function fetchCompetitionMatchesForDate(params: {
     status: String((row as Record<string, unknown>).status ?? ''),
     utcDate: String((row as Record<string, unknown>).utcDate ?? '')
   }));
+}
+
+async function fetchMatchForAnyCompetition(params: { matchId: number; matchDate?: string }): Promise<MatchApi | null> {
+  const { matchId, matchDate } = params;
+  const cachedEvent = espnEventById.get(matchId);
+  if (cachedEvent) {
+    const leagueKey = espnLeagueByEventId.get(matchId) ?? '';
+    const normalized = normalizeEspnEvent(cachedEvent, undefined, leagueKey) as unknown as MatchApi;
+    const needsSummaryData =
+      normalized.status === 'FINISHED' &&
+      ((normalized.score?.halfTime?.home === null ||
+        normalized.score?.halfTime?.home === undefined ||
+        normalized.score?.halfTime?.away === null ||
+        normalized.score?.halfTime?.away === undefined) ||
+        !normalized.incidents);
+    if (needsSummaryData && leagueKey) {
+      return enrichMatchScoreFromSummary(normalized, leagueKey, matchId);
+    }
+    return normalized;
+  }
+
+  if (matchDate) {
+    const matches = await fetchEspnMatchesInRange(matchDate, matchDate);
+    const found = matches.find((item) => Number((item as Record<string, unknown>).id ?? 0) === matchId);
+    if (found) {
+      const normalized = found as unknown as MatchApi;
+      const compId = Number(normalized.competition?.id ?? Number.NaN);
+      const leagueKey = Number.isFinite(compId) ? getEspnLeagueByFootballCompetitionId(compId) ?? '' : '';
+      const needsSummaryData =
+        normalized.status === 'FINISHED' &&
+        ((normalized.score?.halfTime?.home === null ||
+          normalized.score?.halfTime?.home === undefined ||
+          normalized.score?.halfTime?.away === null ||
+          normalized.score?.halfTime?.away === undefined) ||
+          !normalized.incidents);
+      if (needsSummaryData && leagueKey) {
+        return enrichMatchScoreFromSummary(normalized, leagueKey, matchId);
+      }
+      return normalized;
+    }
+  }
+
+  return null;
 }
 
 function calculatePointsForPrediction(params: {
@@ -1899,18 +1899,35 @@ app.post('/internal/db/groups', requireFirebaseAuth, async (req: AuthedRequest, 
   const admin = requireSupabaseAdmin(res);
   if (!admin) return;
 
-  const { name, competitionId, competitionName, predictionLockMinutes, bonusEnabled } = req.body as {
+  const { name, competitionId, competitionName, predictionLockMinutes, bonusEnabled, matchSelectionMode, customMatches, customMatchDate } = req.body as {
     name?: string;
     competitionId?: number;
     competitionName?: string;
     predictionLockMinutes?: number;
     bonusEnabled?: boolean;
+    matchSelectionMode?: 'competition' | 'custom';
+    customMatches?: number[];
+    customMatchDate?: string;
   };
   const ownerUid = req.auth?.uid ?? '';
   const ownerEmail = req.auth?.email ?? '';
 
-  if (!name?.trim() || !competitionId || !competitionName?.trim()) {
-    res.status(400).json({ error: 'name, competitionId and competitionName are required.' });
+  const normalizedMode = matchSelectionMode === 'custom' ? 'custom' : 'competition';
+  const normalizedCustomMatchDate = typeof customMatchDate === 'string' && customMatchDate.trim() ? customMatchDate : '';
+  const normalizedCustomMatches = Array.isArray(customMatches)
+    ? Array.from(new Set(customMatches.filter((item) => typeof item === 'number' && Number.isFinite(item) && item > 0)))
+    : [];
+
+  if (!name?.trim()) {
+    res.status(400).json({ error: 'name is required.' });
+    return;
+  }
+  if (normalizedMode === 'competition' && (!competitionId || !competitionName?.trim())) {
+    res.status(400).json({ error: 'competitionId and competitionName are required for competition mode.' });
+    return;
+  }
+  if (normalizedMode === 'custom' && (!normalizedCustomMatchDate || normalizedCustomMatches.length === 0)) {
+    res.status(400).json({ error: 'customMatchDate and at least one custom match are required.' });
     return;
   }
 
@@ -1921,24 +1938,13 @@ app.post('/internal/db/groups', requireFirebaseAuth, async (req: AuthedRequest, 
   const normalizedBonusEnabled = Boolean(bonusEnabled);
 
   try {
-    const { data: profile } = await admin
-      .from('user_profiles')
-      .select('subscription_tier')
-      .eq('user_uid', ownerUid)
-      .maybeSingle<{ subscription_tier?: string | null }>();
-    const tier = (profile?.subscription_tier ?? 'free').toLowerCase();
-    if (tier !== 'pro') {
-      const { count, error: countError } = await admin
-        .from('groups')
-        .select('id', { count: 'exact', head: true })
-        .eq('owner_uid', ownerUid);
-      if (countError) {
-        throw new Error(countError.message);
-      }
-      if ((count ?? 0) >= freeMaxOwnedGroups) {
-        res
-          .status(402)
-          .json({ error: `Free plan limit reached (${freeMaxOwnedGroups} groups). Upgrade to Pro for unlimited groups.` });
+    let validatedCustomMatches: number[] = [];
+    if (normalizedMode === 'custom') {
+      const allMatchesForDate = await fetchEspnMatchesInRange(normalizedCustomMatchDate, normalizedCustomMatchDate);
+      const allowedIds = new Set(allMatchesForDate.map((item) => Number((item as Record<string, unknown>).id ?? 0)).filter(Boolean));
+      validatedCustomMatches = normalizedCustomMatches.filter((matchId) => allowedIds.has(matchId));
+      if (validatedCustomMatches.length === 0) {
+        res.status(400).json({ error: 'None of the selected custom matches were found for the chosen date.' });
         return;
       }
     }
@@ -1947,8 +1953,9 @@ app.post('/internal/db/groups', requireFirebaseAuth, async (req: AuthedRequest, 
       .from('groups')
       .insert({
         name: name.trim(),
-        competition_id: competitionId,
-        competition_name: competitionName.trim(),
+        competition_id: normalizedMode === 'custom' ? 0 : Number(competitionId),
+        competition_name: normalizedMode === 'custom' ? 'Custom Matches' : String(competitionName).trim(),
+        match_selection_mode: normalizedMode,
         owner_uid: ownerUid,
         prediction_lock_minutes: normalizedLockMinutes,
         bonus_enabled: normalizedBonusEnabled
@@ -1969,6 +1976,19 @@ app.post('/internal/db/groups', requireFirebaseAuth, async (req: AuthedRequest, 
       throw new Error(membershipError.message);
     }
 
+    if (normalizedMode === 'custom') {
+      const rows = validatedCustomMatches.map((matchId) => ({
+        group_id: group.id,
+        match_id: matchId,
+        match_date: normalizedCustomMatchDate,
+        added_by_uid: ownerUid
+      }));
+      const { error: customError } = await admin.from('group_custom_matches').upsert(rows, { onConflict: 'group_id,match_id' });
+      if (customError) {
+        throw new Error(customError.message);
+      }
+    }
+
     res.status(200).json({ group });
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to create group.' });
@@ -1976,121 +1996,15 @@ app.post('/internal/db/groups', requireFirebaseAuth, async (req: AuthedRequest, 
 });
 
 app.get('/internal/billing/status', requireFirebaseAuth, async (req: AuthedRequest, res) => {
-  const admin = requireSupabaseAdmin(res);
-  if (!admin) return;
-  const userUid = req.auth?.uid ?? '';
-
-  try {
-    const { data, error } = await admin
-      .from('user_profiles')
-      .select('subscription_tier,subscription_status,pro_expires_at,paypal_subscription_id')
-      .eq('user_uid', userUid)
-      .maybeSingle<{
-        subscription_tier?: string | null;
-        subscription_status?: string | null;
-        pro_expires_at?: string | null;
-        paypal_subscription_id?: string | null;
-      }>();
-    if (error) throw new Error(error.message);
-
-    res.status(200).json({
-      tier: (data?.subscription_tier ?? 'free').toLowerCase(),
-      status: data?.subscription_status ?? 'inactive',
-      proExpiresAt: data?.pro_expires_at ?? null,
-      paypalSubscriptionId: data?.paypal_subscription_id ?? null,
-      paypalConfigured: hasPayPalConfig(),
-      paypalClientId: paypalClientId || null,
-      paypalMode
-    });
-  } catch (error) {
-    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to load billing status.' });
-  }
+  res.status(503).json({ error: 'Billing is temporarily disabled.' });
 });
 
 app.post('/internal/billing/paypal/order', requireFirebaseAuth, async (req: AuthedRequest, res) => {
-  if (!hasPayPalConfig()) {
-    res.status(500).json({ error: 'PayPal credentials are missing on server.' });
-    return;
-  }
-
-  try {
-    const response = await paypalRequest('/v2/checkout/orders', {
-      method: 'POST',
-      body: JSON.stringify({
-        intent: 'CAPTURE',
-        purchase_units: [
-          {
-            description: 'PredictLeague Pro Monthly',
-            amount: { currency_code: 'USD', value: paypalPlanPriceUsd.toFixed(2) }
-          }
-        ],
-        application_context: {
-          return_url: `${appBaseUrl}/?paypal=success`,
-          cancel_url: `${appBaseUrl}/?paypal=cancel`,
-          brand_name: 'PredictLeague',
-          user_action: 'PAY_NOW'
-        }
-      })
-    });
-    const payload = (await response.json()) as {
-      id?: string;
-      links?: Array<{ rel?: string; href?: string }>;
-      message?: string;
-    };
-    if (!response.ok || !payload.id) {
-      throw new Error(payload.message ?? 'Failed to create PayPal order.');
-    }
-    const approveUrl = payload.links?.find((link) => link.rel === 'approve')?.href ?? '';
-    res.status(200).json({ orderId: payload.id, approveUrl });
-  } catch (error) {
-    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to create PayPal order.' });
-  }
+  res.status(503).json({ error: 'Billing is temporarily disabled.' });
 });
 
 app.post('/internal/billing/paypal/capture', requireFirebaseAuth, async (req: AuthedRequest, res) => {
-  const admin = requireSupabaseAdmin(res);
-  if (!admin) return;
-  if (!hasPayPalConfig()) {
-    res.status(500).json({ error: 'PayPal credentials are missing on server.' });
-    return;
-  }
-
-  const { orderId } = req.body as { orderId?: string };
-  if (!orderId?.trim()) {
-    res.status(400).json({ error: 'orderId is required.' });
-    return;
-  }
-
-  try {
-    const response = await paypalRequest(`/v2/checkout/orders/${encodeURIComponent(orderId)}/capture`, {
-      method: 'POST',
-      body: JSON.stringify({})
-    });
-    const payload = (await response.json()) as { status?: string; message?: string };
-    if (!response.ok || payload.status !== 'COMPLETED') {
-      throw new Error(payload.message ?? 'PayPal capture did not complete.');
-    }
-
-    const userUid = req.auth?.uid ?? '';
-    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-    const { error } = await admin.from('user_profiles').upsert(
-      {
-        user_uid: userUid,
-        email: req.auth?.email?.toLowerCase().trim() ?? '',
-        subscription_tier: 'pro',
-        subscription_status: 'active',
-        paypal_subscription_id: orderId,
-        pro_expires_at: expiresAt,
-        updated_at: new Date().toISOString()
-      },
-      { onConflict: 'user_uid' }
-    );
-    if (error) throw new Error(error.message);
-
-    res.status(200).json({ ok: true, tier: 'pro', status: 'active', proExpiresAt: expiresAt });
-  } catch (error) {
-    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to capture PayPal order.' });
-  }
+  res.status(503).json({ error: 'Billing is temporarily disabled.' });
 });
 
 app.put('/internal/db/groups/:groupId/settings', requireFirebaseAuth, async (req: AuthedRequest, res) => {
@@ -2136,6 +2050,35 @@ app.put('/internal/db/groups/:groupId/settings', requireFirebaseAuth, async (req
     res.status(200).json({ group: data });
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to update settings.' });
+  }
+});
+
+app.delete('/internal/db/groups/:groupId', requireFirebaseAuth, async (req: AuthedRequest, res) => {
+  const admin = requireSupabaseAdmin(res);
+  if (!admin) return;
+  const rawGroupId = req.params.groupId;
+  const groupId = Array.isArray(rawGroupId) ? rawGroupId[0] : rawGroupId;
+  if (!groupId) {
+    res.status(400).json({ error: 'groupId is required.' });
+    return;
+  }
+
+  try {
+    const membership = await requireGroupMember(req, res, groupId);
+    if (!membership) return;
+    if (membership.role !== 'owner') {
+      res.status(403).json({ error: 'Only group owner can delete the group.' });
+      return;
+    }
+
+    const { error } = await admin.from('groups').delete().eq('id', groupId).eq('owner_uid', membership.user_uid);
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    res.status(200).json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to delete group.' });
   }
 });
 
@@ -2375,6 +2318,114 @@ app.put('/internal/db/groups/:groupId/bonus-matches', requireFirebaseAuth, async
   }
 });
 
+app.get('/internal/db/groups/:groupId/custom-matches', requireFirebaseAuth, async (req: AuthedRequest, res) => {
+  const admin = requireSupabaseAdmin(res);
+  if (!admin) return;
+  const rawGroupId = req.params.groupId;
+  const groupId = Array.isArray(rawGroupId) ? rawGroupId[0] : rawGroupId;
+  if (!groupId) {
+    res.status(400).json({ error: 'groupId is required.' });
+    return;
+  }
+  const matchDate = typeof req.query.matchDate === 'string' ? req.query.matchDate : undefined;
+
+  try {
+    const membership = await requireGroupMember(req, res, groupId);
+    if (!membership) return;
+
+    let query = admin.from('group_custom_matches').select('*').eq('group_id', groupId);
+    if (matchDate) {
+      query = query.eq('match_date', matchDate);
+    }
+    const { data, error } = await query.order('created_at', { ascending: false });
+    if (error) {
+      throw new Error(error.message);
+    }
+    res.status(200).json({ customMatches: data ?? [] });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to load custom matches.' });
+  }
+});
+
+app.put('/internal/db/groups/:groupId/custom-matches', requireFirebaseAuth, async (req: AuthedRequest, res) => {
+  const admin = requireSupabaseAdmin(res);
+  if (!admin) return;
+  const rawGroupId = req.params.groupId;
+  const groupId = Array.isArray(rawGroupId) ? rawGroupId[0] : rawGroupId;
+  if (!groupId) {
+    res.status(400).json({ error: 'groupId is required.' });
+    return;
+  }
+  const { matchDate, matchIds } = req.body as { matchDate?: string; matchIds?: number[] };
+  if (!matchDate || !Array.isArray(matchIds)) {
+    res.status(400).json({ error: 'matchDate and matchIds are required.' });
+    return;
+  }
+  const normalizedMatchIds = Array.from(new Set(matchIds.filter((item) => typeof item === 'number' && Number.isFinite(item) && item > 0)));
+
+  try {
+    const membership = await requireGroupMember(req, res, groupId);
+    if (!membership) return;
+    if (membership.role !== 'owner') {
+      res.status(403).json({ error: 'Only group owner can update custom matches.' });
+      return;
+    }
+
+    const { data: group, error: groupError } = await admin
+      .from('groups')
+      .select('match_selection_mode')
+      .eq('id', groupId)
+      .single<{ match_selection_mode: 'competition' | 'custom' }>();
+    if (groupError || !group) {
+      throw new Error(groupError?.message ?? 'Group not found.');
+    }
+    if (group.match_selection_mode !== 'custom') {
+      res.status(400).json({ error: 'This group does not use custom match selection mode.' });
+      return;
+    }
+
+    const allMatchesForDate = await fetchEspnMatchesInRange(matchDate, matchDate);
+    const allowedIds = new Set(allMatchesForDate.map((item) => Number((item as Record<string, unknown>).id ?? 0)).filter(Boolean));
+    const validIds = normalizedMatchIds.filter((matchId) => allowedIds.has(matchId));
+
+    const { error: deleteError } = await admin
+      .from('group_custom_matches')
+      .delete()
+      .eq('group_id', groupId)
+      .eq('match_date', matchDate);
+    if (deleteError) {
+      throw new Error(deleteError.message);
+    }
+
+    if (validIds.length > 0) {
+      const rows = validIds.map((matchId) => ({
+        group_id: groupId,
+        match_id: matchId,
+        match_date: matchDate,
+        added_by_uid: membership.user_uid
+      }));
+      const { error: upsertError } = await admin.from('group_custom_matches').upsert(rows, { onConflict: 'group_id,match_id' });
+      if (upsertError) {
+        throw new Error(upsertError.message);
+      }
+    }
+
+    const { data, error } = await admin
+      .from('group_custom_matches')
+      .select('*')
+      .eq('group_id', groupId)
+      .eq('match_date', matchDate)
+      .order('created_at', { ascending: false });
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    res.status(200).json({ customMatches: data ?? [] });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to update custom matches.' });
+  }
+});
+
 app.get('/internal/db/groups/:groupId/predictions', requireFirebaseAuth, async (req: AuthedRequest, res) => {
   const admin = requireSupabaseAdmin(res);
   if (!admin) return;
@@ -2433,9 +2484,9 @@ app.get('/internal/db/groups/:groupId/leaderboard', requireFirebaseAuth, async (
 
     const { data: group, error: groupError } = await admin
       .from('groups')
-      .select('bonus_enabled,competition_id')
+      .select('bonus_enabled,competition_id,match_selection_mode')
       .eq('id', groupId)
-      .single<{ bonus_enabled: boolean; competition_id: number }>();
+      .single<{ bonus_enabled: boolean; competition_id: number; match_selection_mode: 'competition' | 'custom' }>();
     if (groupError || !group) {
       throw new Error(groupError?.message ?? 'Group not found.');
     }
@@ -2469,11 +2520,17 @@ app.get('/internal/db/groups/:groupId/leaderboard', requireFirebaseAuth, async (
     await Promise.all(
       matchIds.map(async (matchId) => {
         const predictionForDate = (allPredictions ?? []).find((item) => item.match_id === matchId);
-        const match = await fetchMatchForCompetition({
-          competitionId: group.competition_id,
-          matchId,
-          matchDate: predictionForDate?.match_date
-        });
+        const match =
+          group.match_selection_mode === 'custom'
+            ? await fetchMatchForAnyCompetition({
+                matchId,
+                matchDate: predictionForDate?.match_date
+              })
+            : await fetchMatchForCompetition({
+                competitionId: group.competition_id,
+                matchId,
+                matchDate: predictionForDate?.match_date
+              });
         if (match) matchesById.set(matchId, match);
       })
     );
@@ -2710,29 +2767,55 @@ app.post('/internal/db/predictions', requireFirebaseAuth, async (req: AuthedRequ
 
     const { data: group, error: groupError } = await admin
       .from('groups')
-      .select('competition_id,prediction_lock_minutes')
+      .select('competition_id,prediction_lock_minutes,match_selection_mode')
       .eq('id', groupId)
-      .single<{ competition_id: number; prediction_lock_minutes: number }>();
+      .single<{ competition_id: number; prediction_lock_minutes: number; match_selection_mode: 'competition' | 'custom' }>();
     if (groupError || !group) {
       throw new Error(groupError?.message ?? 'Group not found.');
     }
 
-    const competitionMatches = await fetchCompetitionMatchesForDate({
-      competitionId: group.competition_id,
-      matchDate
-    });
-    const matchData = competitionMatches.find((item) => item.id === matchId);
-    if (!matchData) {
-      res.status(400).json({ error: 'Match not found for this competition/date.' });
-      return;
-    }
-    const matchCompetitionId = matchData.competition?.id;
-    const matchStatus = matchData.status ?? '';
-    const kickoffAt = matchData.utcDate ? Date.parse(matchData.utcDate) : Number.NaN;
+    let matchStatus = '';
+    let kickoffAt = Number.NaN;
+    if (group.match_selection_mode === 'custom') {
+      const { data: selected, error: selectedError } = await admin
+        .from('group_custom_matches')
+        .select('match_id')
+        .eq('group_id', groupId)
+        .eq('match_date', matchDate)
+        .eq('match_id', matchId)
+        .maybeSingle<{ match_id: number }>();
+      if (selectedError) {
+        throw new Error(selectedError.message);
+      }
+      if (!selected) {
+        res.status(400).json({ error: 'This match is not in the custom selection for this group/date.' });
+        return;
+      }
 
-    if (matchCompetitionId !== group.competition_id) {
-      res.status(400).json({ error: 'This match is not part of the group competition.' });
-      return;
+      const matchData = await fetchMatchForAnyCompetition({ matchId, matchDate });
+      if (!matchData) {
+        res.status(400).json({ error: 'Match not found for this date.' });
+        return;
+      }
+      matchStatus = matchData.status ?? '';
+      kickoffAt = matchData.utcDate ? Date.parse(matchData.utcDate) : Number.NaN;
+    } else {
+      const competitionMatches = await fetchCompetitionMatchesForDate({
+        competitionId: group.competition_id,
+        matchDate
+      });
+      const matchData = competitionMatches.find((item) => item.id === matchId);
+      if (!matchData) {
+        res.status(400).json({ error: 'Match not found for this competition/date.' });
+        return;
+      }
+      const matchCompetitionId = matchData.competition?.id;
+      if (matchCompetitionId !== group.competition_id) {
+        res.status(400).json({ error: 'This match is not part of the group competition.' });
+        return;
+      }
+      matchStatus = matchData.status ?? '';
+      kickoffAt = matchData.utcDate ? Date.parse(matchData.utcDate) : Number.NaN;
     }
 
     const lockMinutes = Math.max(0, Math.min(180, Number(group.prediction_lock_minutes ?? 0)));

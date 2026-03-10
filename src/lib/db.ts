@@ -5,6 +5,7 @@ export type AppGroup = {
   name: string;
   competition_id: number;
   competition_name: string;
+  match_selection_mode: 'competition' | 'custom';
   owner_uid: string;
   prediction_lock_minutes: number;
   bonus_enabled: boolean;
@@ -86,6 +87,14 @@ export type GroupBonusMatch = {
   created_at: string;
 };
 
+export type GroupCustomMatch = {
+  group_id: string;
+  match_id: number;
+  match_date: string;
+  added_by_uid: string;
+  created_at: string;
+};
+
 export type LeaderboardEntry = {
   rank: number;
   user_uid: string;
@@ -142,6 +151,9 @@ export async function createGroup(params: {
   name: string;
   competitionId: number;
   competitionName: string;
+  matchSelectionMode?: 'competition' | 'custom';
+  customMatches?: number[];
+  customMatchDate?: string;
 }) {
   const payload = (await authedFetch('/internal/db/groups', {
     method: 'POST',
@@ -149,6 +161,9 @@ export async function createGroup(params: {
       name: params.name,
       competitionId: params.competitionId,
       competitionName: params.competitionName,
+      matchSelectionMode: params.matchSelectionMode ?? 'competition',
+      customMatches: params.customMatches ?? [],
+      customMatchDate: params.customMatchDate,
       predictionLockMinutes: 5,
       bonusEnabled: false
     })
@@ -181,6 +196,12 @@ export async function acceptPendingInvites(_: { userUid: string; userEmail: stri
 export async function loadGroupsForUser(_: string) {
   const payload = (await authedFetch('/internal/db/groups')) as { groups: AppGroup[] };
   return payload.groups ?? [];
+}
+
+export async function deleteGroup(groupId: string) {
+  await authedFetch(`/internal/db/groups/${encodeURIComponent(groupId)}`, {
+    method: 'DELETE'
+  });
 }
 
 export async function loadInvitesForGroup(groupId: string) {
@@ -316,6 +337,27 @@ export async function upsertGroupBonusMatches(
     body: JSON.stringify({ items })
   })) as { bonusMatches: GroupBonusMatch[] };
   return payload.bonusMatches ?? [];
+}
+
+export async function loadGroupCustomMatches(groupId: string, matchDate?: string) {
+  const query = new URLSearchParams();
+  if (matchDate) {
+    query.set('matchDate', matchDate);
+  }
+  const path = `/internal/db/groups/${encodeURIComponent(groupId)}/custom-matches${query.toString() ? `?${query.toString()}` : ''}`;
+  const payload = (await authedFetch(path)) as { customMatches: GroupCustomMatch[] };
+  return payload.customMatches ?? [];
+}
+
+export async function updateGroupCustomMatches(groupId: string, params: { matchDate: string; matchIds: number[] }) {
+  const payload = (await authedFetch(`/internal/db/groups/${encodeURIComponent(groupId)}/custom-matches`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      matchDate: params.matchDate,
+      matchIds: params.matchIds
+    })
+  })) as { customMatches: GroupCustomMatch[] };
+  return payload.customMatches ?? [];
 }
 
 export async function loadGroupLeaderboard(params: {

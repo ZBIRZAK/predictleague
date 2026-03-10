@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="PrediLeague mark">
+  <defs>
+    <linearGradient id="plg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#18c843" />
+      <stop offset="100%" stop-color="#069a2a" />
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="22" fill="#101119" />
+  <path fill="url(#plg)" d="M64 11 104 34v46l-40 23L24 80V34Zm0 15-26.5 15.3V72L64 87.4 90.5 72V41.3Z" />
+  <path fill="#f1f1f4" d="M64 38 83 49v22L64 82 45 71V49Zm0 10.2L54 54v11.7L64 60Zm8.4 5.8L64 60v5.7L74 71Z" />
+</svg>

@@ -66,9 +66,8 @@ Invite emails are sent by the backend route `/internal/invite-email` using the S
 This endpoint now requires a valid Firebase ID token in the `Authorization: Bearer ...` header.
 
 Billing/paywall:
-- Free users can create up to `FREE_MAX_OWNED_GROUPS` groups.
-- Pro plan uses PayPal checkout (`$4.99/mo` by default, configurable with `PAYWALL_PRO_PRICE_USD`).
-- Configure `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET` on the server to enable upgrade flow.
+- Billing is temporarily disabled.
+- PayPal-related environment variables can stay in `.env` for later reactivation.
 
 Data sourcing:
 - Matches/game endpoints are ESPN-backed.

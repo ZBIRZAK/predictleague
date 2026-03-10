@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-label="predileague.com - Predict Today. Top the League.">
+  <defs>
+    <linearGradient id="plg2-dark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#19ca45" />
+      <stop offset="100%" stop-color="#07a12d" />
+    </linearGradient>
+  </defs>
+
+  <g transform="translate(54 18)">
+    <path fill="url(#plg2-dark)" d="M132 0 248 66v132l-116 66L16 198V66Zm0 28-92 52.4v103.2L132 236l92-52.4V80.4Z" />
+    <path fill="#f4f4f7" d="M132 63 191 97v68l-59 34-59-34V97Zm0 31-29 17v35l29-17Zm26 17-26 18v17l31 18v-35Z" />
+  </g>
+
+  <text x="354" y="154" fill="#f1f1f5" font-size="102" font-weight="700" font-family="Rubik, Inter, Arial, sans-serif">predileague.com</text>
+  <text x="354" y="228" fill="#8f91a6" font-size="56" font-weight="500" font-family="Rubik, Inter, Arial, sans-serif">Predict Today. Top the League.</text>
+</svg>
