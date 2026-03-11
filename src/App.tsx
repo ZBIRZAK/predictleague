@@ -511,15 +511,35 @@ function isValidEmailAddress(value: string) {
 }
 
 function mapFirebaseAuthError(error: unknown, fallback: string) {
-  const message = error instanceof Error ? error.message : fallback;
-  if (!(error instanceof Error)) return message;
-  if (message.includes('auth/invalid-email')) return 'Enter a valid email address.';
-  if (message.includes('auth/email-already-in-use')) return 'This email is already registered. Try login instead.';
-  if (message.includes('auth/weak-password')) return 'Password is too weak. Use at least 8 characters.';
-  if (message.includes('auth/invalid-credential')) return 'Invalid email or password.';
-  if (message.includes('auth/too-many-requests')) return 'Too many attempts. Please try again later.';
-  if (message.includes('auth/popup-closed-by-user')) return 'Google sign-in popup was closed.';
-  return message;
+  const details =
+    error && typeof error === 'object'
+      ? (error as { code?: unknown; message?: unknown })
+      : { code: undefined, message: undefined };
+  const code = typeof details.code === 'string' ? details.code : '';
+  const message =
+    typeof details.message === 'string' && details.message.trim()
+      ? details.message
+      : error instanceof Error
+        ? error.message
+        : fallback;
+  const combined = `${code} ${message}`.toLowerCase();
+
+  if (combined.includes('auth/invalid-email')) return 'Enter a valid email address.';
+  if (combined.includes('auth/email-already-in-use')) return 'This email is already registered. Try login instead.';
+  if (combined.includes('auth/weak-password')) return 'Password is too weak. Use at least 8 characters.';
+  if (
+    combined.includes('auth/invalid-credential') ||
+    combined.includes('auth/invalid-login-credentials') ||
+    combined.includes('auth/wrong-password') ||
+    combined.includes('auth/user-not-found')
+  ) {
+    return 'Invalid email or password.';
+  }
+  if (combined.includes('auth/too-many-requests')) return 'Too many attempts. Please try again later.';
+  if (combined.includes('auth/network-request-failed')) return 'Network error. Check your connection and try again.';
+  if (combined.includes('auth/user-disabled')) return 'This account has been disabled.';
+  if (combined.includes('auth/popup-closed-by-user')) return 'Google sign-in popup was closed.';
+  return message || fallback;
 }
 
 function ImportantMatchCard({ match, onOpen }: { match: Match; onOpen: (match: Match) => Promise<void> }) {
@@ -785,12 +805,6 @@ function App() {
   const normalizedInviteEmail = inviteEmail.trim().toLowerCase();
   const isAuthEmailValid = isValidEmailAddress(normalizedAuthEmail);
   const isSignupMode = authMode === 'signup';
-  const isSignupPasswordValid = password.length >= 8;
-  const doesPasswordMatch = password === confirmPassword;
-  const canSubmitAuth =
-    authMode === 'login'
-      ? isAuthEmailValid && password.length > 0
-      : isAuthEmailValid && isSignupPasswordValid && doesPasswordMatch;
   const yesterdayDate = useMemo(() => shiftLocalDate(today, -1), [today]);
   const tomorrowDate = useMemo(() => shiftLocalDate(today, 1), [today]);
 
@@ -2801,7 +2815,7 @@ function App() {
                   type="button"
                   className="refresh"
                   onClick={() => void (authMode === 'login' ? handleLogin() : handleRegister())}
-                  disabled={authLoading || !canSubmitAuth}
+                  disabled={authLoading}
                 >
                   {authLoading ? 'Please wait...' : authMode === 'login' ? 'Login' : signupCodeSent ? 'Verify account' : 'Sign up'}
                 </button>
