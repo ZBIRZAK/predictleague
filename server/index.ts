@@ -3098,9 +3098,10 @@ app.put('/internal/db/profile', requireFirebaseAuth, async (req: AuthedRequest, 
   }
 });
 
-app.use('/api', async (req, res) => {
+const apiProxyHandler = async (req: express.Request, res: express.Response) => {
   try {
-    const upstreamPath = req.originalUrl.replace(/^\/api/, '');
+    const requestPath = req.originalUrl.startsWith('/api/') ? req.originalUrl.replace(/^\/api/, '') : req.originalUrl;
+    const upstreamPath = requestPath.startsWith('/') ? requestPath : `/${requestPath}`;
     const upstreamUrl = new URL(upstreamPath, 'https://espn.local');
     const pathname = upstreamUrl.pathname.toLowerCase();
     const method = req.method.toUpperCase();
@@ -3309,6 +3310,15 @@ app.use('/api', async (req, res) => {
     const message = error instanceof Error ? error.message : 'Proxy request failed.';
     res.status(502).json({ error: message });
   }
+};
+
+app.use('/api', apiProxyHandler);
+app.use((req, res, next) => {
+  if (req.path.toLowerCase().startsWith('/v4/')) {
+    void apiProxyHandler(req, res);
+    return;
+  }
+  next();
 });
 
 const __filename = fileURLToPath(import.meta.url);
