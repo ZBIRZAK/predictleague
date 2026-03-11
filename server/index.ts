@@ -1155,86 +1155,6 @@ function normalizeEspnTopScorers(payload: Record<string, unknown>, limit: number
   return { scorers: scorers.filter((row) => (row.player?.name ?? '').trim().length > 0) };
 }
 
-async function fetchEspnStandingsWithSeasonFallback(espnLeague: string, seasonStart: string | null) {
-  const seasonNum = seasonStart ? Number(seasonStart) : Number.NaN;
-  const candidates: Array<string | null> = [];
-  if (Number.isFinite(seasonNum)) {
-    candidates.push(String(seasonNum), String(seasonNum + 1));
-  }
-  candidates.push(null);
-  const tried = new Set<string>();
-  for (const season of candidates) {
-    const key = season ?? 'none';
-    if (tried.has(key)) continue;
-    tried.add(key);
-    const seasonQuery = season ? `?season=${encodeURIComponent(season)}` : '';
-    const payload = await fetchEspnJson(`/apis/site/v2/sports/soccer/${espnLeague}/standings${seasonQuery}`, 90000);
-    const normalized = normalizeEspnStandings(payload);
-    if ((normalized.standings?.[0]?.table?.length ?? 0) > 0) {
-      return normalized;
-    }
-    try {
-      const fromRefs = await fetchEspnCoreStandingsFromRefs(payload);
-      if ((fromRefs.standings?.[0]?.table?.length ?? 0) > 0) {
-        return fromRefs;
-      }
-    } catch {
-      // Ignore and continue other fallbacks.
-    }
-    if (season) {
-      try {
-        const core = await fetchEspnCoreStandings(espnLeague, season);
-        if ((core.standings?.[0]?.table?.length ?? 0) > 0) {
-          return core;
-        }
-      } catch {
-        // Continue trying other season candidates.
-      }
-    }
-  }
-  return { standings: [{ type: 'TOTAL', table: [] }] };
-}
-
-async function fetchEspnScorersWithSeasonFallback(espnLeague: string, seasonStart: string | null, limit: number) {
-  const seasonNum = seasonStart ? Number(seasonStart) : Number.NaN;
-  const candidates: Array<string | null> = [];
-  if (Number.isFinite(seasonNum)) {
-    candidates.push(String(seasonNum), String(seasonNum + 1));
-  }
-  candidates.push(null);
-  const tried = new Set<string>();
-  for (const season of candidates) {
-    const key = season ?? 'none';
-    if (tried.has(key)) continue;
-    tried.add(key);
-    const seasonQuery = season ? `?season=${encodeURIComponent(season)}` : '';
-    const payload = await fetchEspnJson(`/apis/site/v2/sports/soccer/${espnLeague}/leaders${seasonQuery}`, 120000);
-    const normalized = normalizeEspnTopScorers(payload, limit);
-    if ((normalized.scorers?.length ?? 0) > 0) {
-      return normalized;
-    }
-    try {
-      const fromRefs = await fetchEspnCoreScorersFromRefs(payload, limit);
-      if ((fromRefs.scorers?.length ?? 0) > 0) {
-        return fromRefs;
-      }
-    } catch {
-      // Ignore and continue other fallbacks.
-    }
-    if (season) {
-      try {
-        const core = await fetchEspnCoreTopScorers(espnLeague, season, limit);
-        if ((core.scorers?.length ?? 0) > 0) {
-          return core;
-        }
-      } catch {
-        // Continue trying other season candidates.
-      }
-    }
-  }
-  return { scorers: [] };
-}
-
 async function fetchFootballDataJson(pathname: string, query: URLSearchParams) {
   if (!footballDataApiKey) return null;
   const url = new URL(pathname, footballDataApiBase);
@@ -2150,15 +2070,15 @@ app.post('/internal/db/groups', requireFirebaseAuth, async (req: AuthedRequest, 
   }
 });
 
-app.get('/internal/billing/status', requireFirebaseAuth, async (req: AuthedRequest, res) => {
+app.get('/internal/billing/status', requireFirebaseAuth, async (_req: AuthedRequest, res) => {
   res.status(503).json({ error: 'Billing is temporarily disabled.' });
 });
 
-app.post('/internal/billing/paypal/order', requireFirebaseAuth, async (req: AuthedRequest, res) => {
+app.post('/internal/billing/paypal/order', requireFirebaseAuth, async (_req: AuthedRequest, res) => {
   res.status(503).json({ error: 'Billing is temporarily disabled.' });
 });
 
-app.post('/internal/billing/paypal/capture', requireFirebaseAuth, async (req: AuthedRequest, res) => {
+app.post('/internal/billing/paypal/capture', requireFirebaseAuth, async (_req: AuthedRequest, res) => {
   res.status(503).json({ error: 'Billing is temporarily disabled.' });
 });
 
