@@ -15,7 +15,7 @@ This keeps third-party API handling server-side in production and avoids exposin
 
 ## Requirements
 
-- Node.js `20.19.0+` (see `.nvmrc`)
+- Node.js `24.14.0+` (see `.nvmrc`)
 
 ## Features
 
