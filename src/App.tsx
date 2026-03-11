@@ -793,6 +793,7 @@ function App() {
   const [selectedGroupCustomCountryFilter, setSelectedGroupCustomCountryFilter] = useState('');
   const [customSelectionSaving, setCustomSelectionSaving] = useState(false);
   const [perfectCongratsMatch, setPerfectCongratsMatch] = useState<string | null>(null);
+  const [eventBoardVisibleByMatch, setEventBoardVisibleByMatch] = useState<Record<number, boolean>>({});
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const shownPerfectCongratsRef = useRef<Set<string>>(new Set());
   const profileMenuRef = useRef<HTMLDivElement | null>(null);
@@ -3307,6 +3308,7 @@ function App() {
                     const realFtAway = match.score?.fullTime?.away ?? '-';
                     const matchLabel = `${match.homeTeam.name} vs ${match.awayTeam.name}`;
                     const showEventResultState = match.status === 'FINISHED';
+                    const isEventBoardVisible = Boolean(eventBoardVisibleByMatch[match.id]);
                     const goalPlayersHomeActual = incidentPlayersForTeam(match.incidents?.goals, match.homeTeam);
                     const goalPlayersAwayActual = incidentPlayersForTeam(match.incidents?.goals, match.awayTeam);
                     const yellowPlayersHomeActual = incidentPlayersForTeam(match.incidents?.yellowCards, match.homeTeam);
@@ -3409,6 +3411,26 @@ function App() {
                           </section>
                         </div>
 
+                        <div className={`prediction-events-toggle ${isEventBoardVisible ? 'prediction-events-toggle-open' : ''}`}>
+                          <div className="prediction-events-toggle-copy">
+                            <strong>Want to earn more points?</strong>
+                            <span>Add goal and card picks to unlock bonus points.</span>
+                          </div>
+                          <button
+                            type="button"
+                            className="details-btn prediction-events-toggle-btn"
+                            onClick={() =>
+                              setEventBoardVisibleByMatch((prev) => ({
+                                ...prev,
+                                [match.id]: !prev[match.id]
+                              }))
+                            }
+                          >
+                            {isEventBoardVisible ? 'Hide bonus picks' : 'Show bonus picks'}
+                          </button>
+                        </div>
+
+                        {isEventBoardVisible ? (
                         <div className="prediction-events-board">
                           <div className="prediction-events-head">
                             <span />
@@ -3550,6 +3572,7 @@ function App() {
                             </div>
                           </div>
                         </div>
+                        ) : null}
                         {!isOpenForPrediction ? (
                           <p className="saved-line prediction-lock-alert">
                             Predictions locked for this match.

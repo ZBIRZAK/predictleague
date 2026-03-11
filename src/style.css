@@ -1155,6 +1155,43 @@ textarea {
   padding-top: 0.45rem;
 }
 
+.prediction-events-toggle {
+  margin: 0.5rem 0.85rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid rgba(79, 104, 146, 0.28);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(22, 35, 56, 0.62), rgba(12, 23, 38, 0.74));
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.55rem;
+  align-items: center;
+}
+
+.prediction-events-toggle-open {
+  border-color: rgba(77, 149, 104, 0.58);
+  background: linear-gradient(180deg, rgba(17, 48, 36, 0.48), rgba(12, 23, 38, 0.74));
+}
+
+.prediction-events-toggle-copy {
+  display: grid;
+  gap: 0.14rem;
+}
+
+.prediction-events-toggle-copy strong {
+  font-size: 0.82rem;
+  color: #d5e9ff;
+}
+
+.prediction-events-toggle-copy span {
+  font-size: 0.74rem;
+  color: #93aed2;
+}
+
+.prediction-events-toggle-btn {
+  min-height: 30px;
+  white-space: nowrap;
+}
+
 .prediction-events-head {
   display: grid;
   grid-template-columns: 44px minmax(0, 1fr) minmax(0, 1fr);
@@ -1860,6 +1897,7 @@ textarea {
 :root:not([data-theme='dark']) .group-chip-row,
 :root:not([data-theme='dark']) .group-custom-match-row,
 :root:not([data-theme='dark']) .custom-selection-panel,
+:root:not([data-theme='dark']) .prediction-events-toggle,
 :root:not([data-theme='dark']) .prediction-scoreboard,
 :root:not([data-theme='dark']) .prediction-event-marker,
 :root:not([data-theme='dark']) .player-picks-head,
@@ -1882,6 +1920,7 @@ textarea {
 
 :root:not([data-theme='dark']) .group-custom-match-row,
 :root:not([data-theme='dark']) .custom-selection-panel,
+:root:not([data-theme='dark']) .prediction-events-toggle,
 :root:not([data-theme='dark']) .prediction-scoreboard,
 :root:not([data-theme='dark']) .prediction-event-marker,
 :root:not([data-theme='dark']) .player-picks-head,
@@ -1911,6 +1950,14 @@ textarea {
 :root:not([data-theme='dark']) .group-custom-match-meta em,
 :root:not([data-theme='dark']) .group-custom-match-vs {
   color: #6b7f9b;
+}
+
+:root:not([data-theme='dark']) .prediction-events-toggle-copy strong {
+  color: #173251;
+}
+
+:root:not([data-theme='dark']) .prediction-events-toggle-copy span {
+  color: #5f7899;
 }
 
 :root:not([data-theme='dark']) .modal-overlay {
@@ -2177,6 +2224,15 @@ textarea {
   .prediction-events-board {
     gap: 0.35rem;
     padding: 0 0.68rem 0.58rem;
+  }
+
+  .prediction-events-toggle {
+    margin: 0.5rem 0.68rem;
+    grid-template-columns: 1fr;
+  }
+
+  .prediction-events-toggle-btn {
+    width: 100%;
   }
 
   .prediction-events-head,
