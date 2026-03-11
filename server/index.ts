@@ -353,20 +353,6 @@ function getRefFromNode(value: unknown): string | null {
   return typeof ref === 'string' && ref.length > 0 ? ref : null;
 }
 
-function collectRefs(value: unknown, out: Set<string>, depth = 0) {
-  if (!value || typeof value !== 'object' || depth > 8) return;
-  const obj = value as Record<string, unknown>;
-  const ref = getRefFromNode(obj);
-  if (ref) out.add(ref);
-  for (const child of Object.values(obj)) {
-    if (Array.isArray(child)) {
-      for (const item of child) collectRefs(item, out, depth + 1);
-    } else if (child && typeof child === 'object') {
-      collectRefs(child, out, depth + 1);
-    }
-  }
-}
-
 async function resolveCoreObject(value: unknown): Promise<Record<string, unknown> | null> {
   if (!value) return null;
   if (typeof value !== 'object') return null;
@@ -1027,134 +1013,6 @@ async function fetchEspnLeagueMatchesInRange(league: string, from: string, to: s
   return matches;
 }
 
-function extractEspnStatValue(stats: Array<Record<string, unknown>>, names: string[], fallback = 0) {
-  for (const stat of stats) {
-    const key = String(
-      stat.name ?? stat.abbreviation ?? stat.shortDisplayName ?? stat.displayName ?? stat.type ?? ''
-    ).toLowerCase();
-    if (!names.includes(key)) continue;
-    const value = asNumber(stat.value ?? stat.displayValue ?? stat.rawValue);
-    if (value !== null) return value;
-  }
-  return fallback;
-}
-
-function normalizeEspnStandings(payload: Record<string, unknown>) {
-  const findEntries = (node: unknown, depth = 0): Array<Record<string, unknown>> => {
-    if (!node || typeof node !== 'object' || depth > 6) return [];
-    const obj = node as Record<string, unknown>;
-    if (Array.isArray(obj.entries)) {
-      return obj.entries as Array<Record<string, unknown>>;
-    }
-    for (const value of Object.values(obj)) {
-      if (Array.isArray(value)) {
-        for (const item of value) {
-          const found = findEntries(item, depth + 1);
-          if (found.length > 0) return found;
-        }
-      } else if (value && typeof value === 'object') {
-        const found = findEntries(value, depth + 1);
-        if (found.length > 0) return found;
-      }
-    }
-    return [];
-  };
-  const entries = findEntries(payload);
-
-  const table = entries.map((entry, index) => {
-    const team = (entry.team ?? {}) as Record<string, unknown>;
-    const stats = Array.isArray(entry.stats) ? (entry.stats as Array<Record<string, unknown>>) : [];
-    const goalsFor = extractEspnStatValue(stats, ['goalsfor', 'gf']);
-    const goalsAgainst = extractEspnStatValue(stats, ['goalsagainst', 'ga']);
-    const goalDifference = extractEspnStatValue(stats, ['pointdifferential', 'differential', 'gd'], goalsFor - goalsAgainst);
-
-    return {
-      position: extractEspnStatValue(stats, ['rank', 'position'], index + 1),
-      team: {
-        id: asNumber(team.id) ?? index + 1,
-        name: String(team.displayName ?? team.name ?? 'Unknown Team'),
-        shortName: String(team.shortDisplayName ?? team.abbreviation ?? team.name ?? ''),
-        tla: String(team.abbreviation ?? '')
-      },
-      playedGames: extractEspnStatValue(stats, ['gamesplayed', 'gp', 'played']),
-      won: extractEspnStatValue(stats, ['wins', 'w']),
-      draw: extractEspnStatValue(stats, ['ties', 'draws', 'd']),
-      lost: extractEspnStatValue(stats, ['losses', 'l']),
-      points: extractEspnStatValue(stats, ['points', 'pts']),
-      goalsFor,
-      goalsAgainst,
-      goalDifference
-    };
-  });
-
-  return {
-    standings: [
-      {
-        type: 'TOTAL',
-        table
-      }
-    ]
-  };
-}
-
-function normalizeEspnTopScorers(payload: Record<string, unknown>, limit: number) {
-  const findLeaders = (node: unknown, depth = 0): Array<Record<string, unknown>> => {
-    if (!node || typeof node !== 'object' || depth > 6) return [];
-    const obj = node as Record<string, unknown>;
-    if (Array.isArray(obj.leaders)) {
-      return obj.leaders as Array<Record<string, unknown>>;
-    }
-    for (const value of Object.values(obj)) {
-      if (Array.isArray(value)) {
-        for (const item of value) {
-          const found = findLeaders(item, depth + 1);
-          if (found.length > 0) return found;
-        }
-      } else if (value && typeof value === 'object') {
-        const found = findLeaders(value, depth + 1);
-        if (found.length > 0) return found;
-      }
-    }
-    return [];
-  };
-  const categories = Array.isArray(payload.categories) ? (payload.categories as Array<Record<string, unknown>>) : [];
-  const goalsCategory = categories.find((category) => String(category.name ?? '').toLowerCase().includes('goal')) ?? categories[0];
-  const leadersFromCategory = Array.isArray(goalsCategory?.leaders)
-    ? (goalsCategory?.leaders as Array<Record<string, unknown>>)
-    : [];
-  const leadersFromRoot = Array.isArray(payload.leaders) ? (payload.leaders as Array<Record<string, unknown>>) : [];
-  const leaders = leadersFromCategory.length > 0 ? leadersFromCategory : leadersFromRoot.length > 0 ? leadersFromRoot : findLeaders(payload);
-
-  const scorers = leaders.slice(0, Math.max(1, limit)).map((leader, index) => {
-    const athlete = (leader.athlete ?? {}) as Record<string, unknown>;
-    const team = (leader.team ?? {}) as Record<string, unknown>;
-    const statistics = Array.isArray(leader.statistics) ? (leader.statistics as Array<Record<string, unknown>>) : [];
-    const goals = asNumber(leader.value) ?? extractEspnStatValue(statistics, ['goals', 'g'], 0);
-    const assists = extractEspnStatValue(statistics, ['assists', 'a'], 0);
-    const penalties = extractEspnStatValue(statistics, ['penalties', 'pk'], 0);
-    const playedMatches = extractEspnStatValue(statistics, ['gamesplayed', 'gp', 'played'], 0);
-
-    return {
-      player: {
-        id: asNumber(athlete.id) ?? index + 1,
-        name: String(athlete.displayName ?? athlete.fullName ?? athlete.shortName ?? 'Unknown player')
-      },
-      team: {
-        id: asNumber(team.id) ?? null,
-        name: String(team.displayName ?? team.name ?? ''),
-        shortName: String(team.shortDisplayName ?? team.abbreviation ?? ''),
-        tla: String(team.abbreviation ?? '')
-      },
-      playedMatches,
-      goals,
-      assists,
-      penalties
-    };
-  });
-
-  return { scorers: scorers.filter((row) => (row.player?.name ?? '').trim().length > 0) };
-}
-
 async function fetchFootballDataJson(pathname: string, query: URLSearchParams) {
   if (!footballDataApiKey) return null;
   const url = new URL(pathname, footballDataApiBase);
@@ -1220,180 +1078,6 @@ function getFootballDataCompetitionRef(appCompetitionId: number): string {
 function isFootballDataCompetitionSupported(appCompetitionId: number) {
   const espnLeague = getEspnLeagueByFootballCompetitionId(appCompetitionId);
   return Boolean(espnLeague && FOOTBALL_DATA_COMPETITION_CODE_BY_ESPN_LEAGUE[espnLeague]);
-}
-
-async function fetchEspnCoreStandings(espnLeague: string, season: string) {
-  const groupsPayload = await fetchEspnCoreJson(
-    `/v2/sports/soccer/leagues/${espnLeague}/seasons/${encodeURIComponent(season)}/types/1/groups`,
-    90000
-  );
-  const groupNodes = await resolveCoreCollection(groupsPayload.items ?? []);
-  const allEntries: Array<Record<string, unknown>> = [];
-  for (const groupNode of groupNodes) {
-    const ref = getRefFromNode(groupNode);
-    const groupIdMatch = (ref ?? '').match(/\/groups\/(\d+)/);
-    const groupId = groupIdMatch?.[1];
-    if (!groupId) continue;
-    const standingsPayload = await fetchEspnCoreJson(
-      `/v2/sports/soccer/leagues/${espnLeague}/seasons/${encodeURIComponent(season)}/types/1/groups/${groupId}/standings/0`,
-      90000
-    );
-    const entries = await resolveCoreCollection(
-      standingsPayload.entries ?? standingsPayload.items ?? standingsPayload.standings ?? []
-    );
-    allEntries.push(...entries);
-  }
-
-  const table = await mapCoreStandingsEntries(allEntries);
-
-  return {
-    standings: [
-      {
-        type: 'TOTAL',
-        table
-      }
-    ]
-  };
-}
-
-async function fetchEspnCoreTopScorers(espnLeague: string, season: string, limit: number) {
-  const leadersPayload = await fetchEspnCoreJson(
-    `/v2/sports/soccer/leagues/${espnLeague}/seasons/${encodeURIComponent(season)}/types/1/leaders`,
-    120000
-  );
-  const leaderItems = await resolveCoreCollection(leadersPayload.leaders ?? leadersPayload.items ?? []);
-  const scorers = await mapCoreScorersFromLeaderBuckets(leaderItems, limit);
-  return { scorers };
-}
-
-async function mapCoreStandingsEntries(entries: Array<Record<string, unknown>>) {
-  const collectStatsFromNodes = async (nodes: unknown[]) => {
-    const stats: Array<Record<string, unknown>> = [];
-    for (const node of nodes) {
-      const resolved = await resolveCoreObject(node);
-      if (!resolved) continue;
-      const direct = await resolveCoreCollection(resolved.stats);
-      if (direct.length > 0) {
-        stats.push(...direct);
-      }
-      const nestedRecords = await resolveCoreCollection(resolved.records ?? resolved.items);
-      for (const recordNode of nestedRecords) {
-        const recordResolved = await resolveCoreObject(recordNode);
-        if (!recordResolved) continue;
-        const recordStats = await resolveCoreCollection(recordResolved.stats);
-        if (recordStats.length > 0) {
-          stats.push(...recordStats);
-        }
-      }
-    }
-    return stats;
-  };
-
-  const table = [];
-  for (let index = 0; index < entries.length; index += 1) {
-    const entry = await resolveCoreObject(entries[index]);
-    if (!entry) continue;
-    const team = await resolveCoreObject(entry.team);
-    const entryStats = await resolveCoreCollection(entry.stats);
-    const recordStats = await collectStatsFromNodes([entry.records]);
-    const teamRecord = team ? await resolveCoreObject(team.record) : null;
-    const teamRecordStats = await collectStatsFromNodes([teamRecord?.records, teamRecord?.items, teamRecord?.stats, team?.statistics]);
-    const teamStats = await collectStatsFromNodes([team?.statistics, team?.summary]);
-    const stats = [...entryStats, ...recordStats, ...teamRecordStats, ...teamStats];
-    const goalsFor = extractEspnStatValue(stats, ['goalsfor', 'gf', 'goals for', 'for']);
-    const goalsAgainst = extractEspnStatValue(stats, ['goalsagainst', 'ga', 'goals against', 'against']);
-    const goalDifference = extractEspnStatValue(stats, ['pointdifferential', 'differential', 'gd'], goalsFor - goalsAgainst);
-    table.push({
-      position: extractEspnStatValue(stats, ['rank', 'position'], index + 1),
-      team: {
-        id: asNumber(team?.id) ?? index + 1,
-        name: String(team?.displayName ?? team?.name ?? 'Unknown Team'),
-        shortName: String(team?.shortDisplayName ?? team?.abbreviation ?? team?.name ?? ''),
-        tla: String(team?.abbreviation ?? '')
-      },
-      playedGames: extractEspnStatValue(stats, ['gamesplayed', 'matchesplayed', 'played', 'gp', 'mp']),
-      won: extractEspnStatValue(stats, ['wins', 'w', 'win']),
-      draw: extractEspnStatValue(stats, ['ties', 'draws', 'd', 'draw']),
-      lost: extractEspnStatValue(stats, ['losses', 'l', 'loss']),
-      points: extractEspnStatValue(stats, ['points', 'pts', 'point']),
-      goalsFor,
-      goalsAgainst,
-      goalDifference
-    });
-  }
-  return table;
-}
-
-async function mapCoreScorersFromLeaderBuckets(leaderItems: Array<Record<string, unknown>>, limit: number) {
-  const scorers = [];
-  for (let index = 0; index < leaderItems.length && scorers.length < Math.max(1, limit); index += 1) {
-    const leader = await resolveCoreObject(leaderItems[index]);
-    if (!leader) continue;
-    const category = String(leader.name ?? leader.displayName ?? '').toLowerCase();
-    if (category && !category.includes('goal')) continue;
-    const leaders = await resolveCoreCollection(leader.leaders ?? leader.items ?? []);
-    for (let i = 0; i < leaders.length && scorers.length < Math.max(1, limit); i += 1) {
-      const item = await resolveCoreObject(leaders[i]);
-      if (!item) continue;
-      const athlete = await resolveCoreObject(item.athlete);
-      const team = await resolveCoreObject(item.team);
-      const stats = await resolveCoreCollection(item.statistics ?? item.stats ?? []);
-      const goals = asNumber(item.value) ?? extractEspnStatValue(stats, ['goals', 'g'], 0);
-      scorers.push({
-        player: {
-          id: asNumber(athlete?.id) ?? scorers.length + 1,
-          name: String(athlete?.displayName ?? athlete?.fullName ?? athlete?.shortName ?? 'Unknown player')
-        },
-        team: {
-          id: asNumber(team?.id) ?? null,
-          name: String(team?.displayName ?? team?.name ?? ''),
-          shortName: String(team?.shortDisplayName ?? team?.abbreviation ?? ''),
-          tla: String(team?.abbreviation ?? '')
-        },
-        playedMatches: extractEspnStatValue(stats, ['gamesplayed', 'gp', 'played'], 0),
-        goals,
-        assists: extractEspnStatValue(stats, ['assists', 'a'], 0),
-        penalties: extractEspnStatValue(stats, ['penalties', 'pk'], 0)
-      });
-    }
-  }
-  return scorers;
-}
-
-async function fetchEspnCoreStandingsFromRefs(sitePayload: Record<string, unknown>) {
-  const refs = new Set<string>();
-  collectRefs(sitePayload, refs);
-  const candidateRefs = Array.from(refs).filter((ref) => ref.includes('/standings/'));
-  for (const ref of candidateRefs) {
-    const payload = await fetchEspnCoreJson(ref, 90000);
-    const entries = await resolveCoreCollection(
-      (payload as Record<string, unknown>).entries ??
-        (payload as Record<string, unknown>).items ??
-        (payload as Record<string, unknown>).standings ??
-        []
-    );
-    if (entries.length === 0) continue;
-    const table = await mapCoreStandingsEntries(entries);
-    if (table.length > 0) {
-      return { standings: [{ type: 'TOTAL', table }] };
-    }
-  }
-  return { standings: [{ type: 'TOTAL', table: [] }] };
-}
-
-async function fetchEspnCoreScorersFromRefs(sitePayload: Record<string, unknown>, limit: number) {
-  const refs = new Set<string>();
-  collectRefs(sitePayload, refs);
-  const candidateRefs = Array.from(refs).filter((ref) => ref.includes('/leaders'));
-  for (const ref of candidateRefs) {
-    const payload = await fetchEspnCoreJson(ref, 120000);
-    const leaderItems = await resolveCoreCollection((payload as Record<string, unknown>).leaders ?? (payload as Record<string, unknown>).items ?? []);
-    const scorers = await mapCoreScorersFromLeaderBuckets(leaderItems, limit);
-    if (scorers.length > 0) {
-      return { scorers };
-    }
-  }
-  return { scorers: [] };
 }
 
 function requireSupabaseAdmin(res: express.Response) {
@@ -3025,6 +2709,15 @@ const apiProxyHandler = async (req: express.Request, res: express.Response) => {
     const upstreamUrl = new URL(upstreamPath, 'https://espn.local');
     const pathname = upstreamUrl.pathname.toLowerCase();
     const method = req.method.toUpperCase();
+
+    if (method === 'GET' && pathname === '/v4/health') {
+      res.status(200).json({
+        ok: true,
+        runtime: process.env.VERCEL === '1' ? 'vercel' : 'node',
+        path: req.originalUrl
+      });
+      return;
+    }
 
     if (method === 'GET' && pathname === '/v4/competitions') {
       const competitions = ESPN_LEAGUES.map((leagueKey) => {
