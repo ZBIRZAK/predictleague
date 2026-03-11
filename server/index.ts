@@ -9,6 +9,14 @@ const app = express();
 const port = Number(process.env.PORT ?? 8787);
 
 app.use(express.json());
+app.use((req, _res, next) => {
+  // Vercel rewrites /internal/* to /api/internal/* so the API function can receive it.
+  // Normalize back to /internal/* for the existing route handlers.
+  if (req.url.startsWith('/api/internal/')) {
+    req.url = req.url.slice('/api'.length);
+  }
+  next();
+});
 
 const smtpHost = process.env.SMTP_HOST ?? 'smtp.mail.ovh.ca';
 const smtpPort = Number(process.env.SMTP_PORT ?? 587);
@@ -3316,7 +3324,13 @@ if (existsSync(indexFile)) {
   });
 }
 
-app.listen(port, () => {
-  // Keep this startup log simple for terminal-based deployment visibility.
-  console.log(`PredictLeague server listening on http://localhost:${port}`);
-});
+const isVercelRuntime = process.env.VERCEL === '1';
+
+if (!isVercelRuntime) {
+  app.listen(port, () => {
+    // Keep this startup log simple for terminal-based deployment visibility.
+    console.log(`PredictLeague server listening on http://localhost:${port}`);
+  });
+}
+
+export default app;

@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/internal/(.*)",
+      "destination": "/api/internal/$1"
+    }
+  ]
+}

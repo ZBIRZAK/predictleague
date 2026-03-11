@@ -116,6 +116,13 @@ The server serves both:
 - API proxy routes (`/api/...`)
 - static frontend assets from `dist/`
 
+## Vercel Deployment
+
+- This repo includes a Vercel serverless API entrypoint at [`api/[...all].ts`](/Users/mac/Documents/apps/predictleague/api/[...all].ts).
+- Frontend requests to `/api/*` are handled by that function.
+- Frontend requests to `/internal/*` are rewritten by [`vercel.json`](/Users/mac/Documents/apps/predictleague/vercel.json) to the same function.
+- Keep `VITE_*` values for browser-safe config only. Keep secrets in non-`VITE_*` env vars.
+
 ## Quality Commands
 
 ```bash
