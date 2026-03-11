@@ -2017,11 +2017,6 @@ function App() {
     }
   }
 
-  async function handleDeleteSelectedGroup() {
-    if (!selectedGroup) return;
-    await handleDeleteGroupById(selectedGroup);
-  }
-
   function toggleNewGroupCustomMatch(matchId: number) {
     setNewGroupCustomMatchIds((prev) => (prev.includes(matchId) ? prev.filter((id) => id !== matchId) : [...prev, matchId]));
   }
@@ -3142,17 +3137,6 @@ function App() {
                           </div>
                         </div>
                       ) : null}
-
-                      <div className="auth-actions">
-                        <button
-                          type="button"
-                          className="details-btn"
-                          disabled={groupDeleting || groupSettingsBusy}
-                          onClick={() => void handleDeleteSelectedGroup()}
-                        >
-                          {groupDeleting ? 'Deleting Group...' : 'Delete Group'}
-                        </button>
-                      </div>
 
                       <div className="selectors">
                         <label>
