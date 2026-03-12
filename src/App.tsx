@@ -347,6 +347,7 @@ const GUIDE_ACTIONS: GuideActionDefinition[] = [
 const GUIDE_LAST_ACTION_INDEX = GUIDE_ACTIONS.length - 1;
 
 type GuideSnapshot = {
+  groupViewDate: string;
   groups: AppGroup[];
   selectedGroupId: string;
   invites: GroupInvite[];
@@ -940,6 +941,7 @@ function App() {
   const [leaderboardScope, setLeaderboardScope] = useState<'total' | 'weekly'>('total');
   const [groupLeaderboardData, setGroupLeaderboardData] = useState<GroupLeaderboard | null>(null);
   const [groupLeaderboardLoading, setGroupLeaderboardLoading] = useState(false);
+  const [groupViewDate, setGroupViewDate] = useState(today);
   const [groupBonusMatches, setGroupBonusMatches] = useState<GroupBonusMatch[]>([]);
   const [groupSettingsBusy, setGroupSettingsBusy] = useState(false);
   const [lockMinutesInput, setLockMinutesInput] = useState('0');
@@ -1135,6 +1137,7 @@ function App() {
     }
     return total;
   }, [groupMatches, myPredictions, predictionDrafts]);
+  const isViewingToday = groupViewDate === today;
 
   const selectableSelectedGroupCustomPool = useMemo(
     () => selectedGroupCustomPool.filter(isSelectableCustomMatch),
@@ -1501,8 +1504,8 @@ function App() {
       return;
     }
     if (!user) return;
-    void loadGroupData(user.uid, selectedGroup);
-  }, [selectedGroup, user, today, inPageGuideActive]);
+    void loadGroupData(user.uid, selectedGroup, groupViewDate);
+  }, [selectedGroup, user, groupViewDate, inPageGuideActive]);
 
   useEffect(() => {
     if (!selectedGroup) {
@@ -1513,16 +1516,16 @@ function App() {
       return;
     }
 
-    void loadGroupLeaderboardData(selectedGroup.id, leaderboardScope);
-  }, [leaderboardScope, selectedGroup?.id]);
+    void loadGroupLeaderboardData(selectedGroup.id, leaderboardScope, groupViewDate);
+  }, [leaderboardScope, selectedGroup?.id, groupViewDate]);
 
   useEffect(() => {
-    if (page !== 'game' || !selectedGroup || !user || selectedGroup.id === GUIDE_DEMO_GROUP_ID) return;
+    if (page !== 'game' || !selectedGroup || !user || selectedGroup.id === GUIDE_DEMO_GROUP_ID || !isViewingToday) return;
 
     const tick = () => {
       if (document.visibilityState !== 'visible') return;
-      void refreshGroupMatchesOnly(selectedGroup);
-      void refreshGroupRealtimeData(selectedGroup, user.uid, leaderboardScope);
+      void refreshGroupMatchesOnly(selectedGroup, groupViewDate);
+      void refreshGroupRealtimeData(selectedGroup, user.uid, leaderboardScope, groupViewDate);
     };
 
     tick();
@@ -1541,7 +1544,7 @@ function App() {
       document.removeEventListener('visibilitychange', onVisibilityChange);
       window.removeEventListener('focus', onFocus);
     };
-  }, [page, selectedGroup, user, today, leaderboardScope]);
+  }, [page, selectedGroup, user, today, leaderboardScope, groupViewDate, isViewingToday]);
 
   useEffect(() => {
     if (!selectedGroup || !user) return;
@@ -1901,13 +1904,13 @@ function App() {
     setActiveMatchDetails(null);
   }
 
-  async function loadGroupLeaderboardData(groupId: string, scope: 'total' | 'weekly') {
+  async function loadGroupLeaderboardData(groupId: string, scope: 'total' | 'weekly', referenceDateValue: string = groupViewDate) {
     try {
       setGroupLeaderboardLoading(true);
       const data = await loadGroupLeaderboard({
         groupId,
         scope,
-        referenceDate: `${today}T00:00:00.000Z`
+        referenceDate: `${referenceDateValue}T00:00:00.000Z`
       });
       setGroupLeaderboardData(data);
     } catch (err) {
@@ -2010,7 +2013,7 @@ function App() {
       setCustomSelectionSaving(true);
       setError('');
       const rows = await updateGroupCustomMatches(selectedGroup.id, {
-        matchDate: today,
+        matchDate: groupViewDate,
         matchIds
       });
       setSelectedGroupCustomMatches(rows);
@@ -2022,16 +2025,16 @@ function App() {
     }
   }
 
-  async function loadGroupData(userUid: string, group: AppGroup) {
+  async function loadGroupData(userUid: string, group: AppGroup, targetDate: string) {
     try {
       setGroupMatchesLoading(true);
       setError('');
 
       const [inviteRows, predictionRows, memberRows, matchRows] = await Promise.all([
         loadInvitesForGroup(group.id),
-        loadPredictionsForGroup({ groupId: group.id, matchDate: today }),
+        loadPredictionsForGroup({ groupId: group.id, matchDate: targetDate }),
         loadGroupMembers(group.id),
-        loadMatchesForGroupSelection(group, today)
+        loadMatchesForGroupSelection(group, targetDate)
       ]);
 
       setInvites(inviteRows);
@@ -2069,7 +2072,7 @@ function App() {
         };
       }
       setPredictionDrafts(nextDrafts);
-      await Promise.all([loadGroupLeaderboardData(group.id, leaderboardScope), loadGroupBonusData(group.id)]);
+      await Promise.all([loadGroupLeaderboardData(group.id, leaderboardScope, targetDate), loadGroupBonusData(group.id)]);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load group data.');
     } finally {
@@ -2077,9 +2080,9 @@ function App() {
     }
   }
 
-  async function refreshGroupMatchesOnly(group: AppGroup) {
+  async function refreshGroupMatchesOnly(group: AppGroup, targetDate: string) {
     try {
-      const latestMatches = await loadMatchesForGroupSelection(group, today);
+      const latestMatches = await loadMatchesForGroupSelection(group, targetDate);
       const liveMatches = latestMatches.filter((match) => LIVE_MATCH_STATUSES.has(String(match.status ?? '').toUpperCase()));
       if (liveMatches.length === 0) {
         setGroupMatches(latestMatches);
@@ -2102,14 +2105,14 @@ function App() {
     }
   }
 
-  async function refreshGroupRealtimeData(group: AppGroup, userUid: string, scope: 'total' | 'weekly') {
+  async function refreshGroupRealtimeData(group: AppGroup, userUid: string, scope: 'total' | 'weekly', targetDate: string) {
     try {
       const [predictionRows, leaderboardData, inviteRows] = await Promise.all([
-        loadPredictionsForGroup({ groupId: group.id, matchDate: today }),
+        loadPredictionsForGroup({ groupId: group.id, matchDate: targetDate }),
         loadGroupLeaderboard({
           groupId: group.id,
           scope,
-          referenceDate: `${today}T00:00:00.000Z`
+          referenceDate: `${targetDate}T00:00:00.000Z`
         }),
         loadInvitesForGroup(group.id)
       ]);
@@ -2477,7 +2480,7 @@ function App() {
         groupId: selectedGroup.id,
         userUid: user.uid,
         matchId: match.id,
-        matchDate: today,
+        matchDate: groupViewDate,
         htHome: numeric[0],
         htAway: numeric[1],
         ftHome: numeric[2],
@@ -2495,6 +2498,10 @@ function App() {
       return;
     }
     if (!user || !selectedGroup) {
+      return;
+    }
+    if (!isViewingToday) {
+      setError('History mode is read-only. Switch date to today to save predictions.');
       return;
     }
 
@@ -2547,7 +2554,7 @@ function App() {
 
       const latest = await loadPredictionsForGroup({
         groupId: selectedGroup.id,
-        matchDate: today
+        matchDate: groupViewDate
       });
 
       const mine = latest.filter((row) => row.user_uid === user.uid);
@@ -2559,7 +2566,7 @@ function App() {
         byMatch[row.match_id].push(row);
       }
       setGroupPredictionsByMatch(byMatch);
-      await loadGroupLeaderboardData(selectedGroup.id, leaderboardScope);
+      await loadGroupLeaderboardData(selectedGroup.id, leaderboardScope, groupViewDate);
       setMessage(
         lockedMatches > 0 || failCount > 0
           ? `Saved ${successCount} prediction(s). Skipped/failed: ${lockedMatches + failCount}.`
@@ -2744,6 +2751,7 @@ function App() {
 
     if (!inPageGuideSnapshotRef.current) {
       inPageGuideSnapshotRef.current = {
+        groupViewDate,
         groups,
         selectedGroupId,
         invites,
@@ -2758,6 +2766,7 @@ function App() {
     }
 
     clearInPageGuideTimers();
+    setGroupViewDate(today);
     setInPageGuideActive(true);
     applyGuideAction(0);
   }
@@ -2791,6 +2800,7 @@ function App() {
     setSavingAll(false);
     const snapshot = inPageGuideSnapshotRef.current;
     if (snapshot) {
+      setGroupViewDate(snapshot.groupViewDate);
       setGroups(snapshot.groups);
       setSelectedGroupId(snapshot.selectedGroupId);
       setInvites(snapshot.invites);
@@ -4024,6 +4034,25 @@ function App() {
                   <h2>
                     Prediction Board - {selectedGroup.match_selection_mode === 'custom' ? 'Custom Matches' : selectedGroup.competition_name}
                   </h2>
+                  <div className="selectors compact-selectors">
+                    <label>
+                      Prediction Date
+                      <input
+                        type="date"
+                        value={groupViewDate}
+                        max={today}
+                        onChange={(e) => {
+                          const next = e.target.value;
+                          if (!next) return;
+                          setGroupViewDate(next > today ? today : next);
+                        }}
+                      />
+                    </label>
+                    <button type="button" className="details-btn" onClick={() => setGroupViewDate(today)} disabled={isViewingToday}>
+                      Go To Today
+                    </button>
+                  </div>
+                  {!isViewingToday ? <p className="muted">History mode: viewing saved results for {groupViewDate}.</p> : null}
                   <div className="quick-status">
                     <span className="group-chip">Matches: {groupMatches.length}</span>
                     <span className="group-chip">Completed Drafts: {completedDraftCount}</span>
@@ -4036,10 +4065,10 @@ function App() {
                       inPageGuideActive && guideActionIndex === 10 ? 'guide-focus-target guide-arrow-target guide-arrow-inline' : ''
                     }`}
                     data-guide-arrow={inPageGuideActive && guideActionIndex === 10 ? 'Click Save All Predictions' : undefined}
-                    disabled={savingAll || busy || groupMatchesLoading}
+                    disabled={savingAll || busy || groupMatchesLoading || !isViewingToday}
                     onClick={() => void handleSaveAllPredictions()}
                   >
-                    {savingAll ? 'Saving...' : 'Save All Predictions'}
+                    {savingAll ? 'Saving...' : !isViewingToday ? 'History View (Read-only)' : 'Save All Predictions'}
                   </button>
                 </section>
               ) : null}
@@ -4071,6 +4100,8 @@ function App() {
                     const shouldReveal = !isOpenForPrediction;
                     const memberEmailByUid = Object.fromEntries(groupMembers.map((member) => [member.user_uid, member.email]));
                     const guideOwnerUid = user?.uid ?? 'guide-owner';
+                    const realHtHome = match.score?.halfTime?.home ?? '-';
+                    const realHtAway = match.score?.halfTime?.away ?? '-';
                     const realFtHome = match.score?.fullTime?.home ?? '-';
                     const realFtAway = match.score?.fullTime?.away ?? '-';
                     const matchLabel = `${match.homeTeam.name} vs ${match.awayTeam.name}`;
@@ -4187,7 +4218,11 @@ function App() {
                                 />
                               </div>
                             </label>
-                            <p className="prediction-real-result">{realFtHome}-{realFtAway}</p>
+                            <p className="prediction-real-result">
+                              HT {realHtHome}-{realHtAway} | FT {realFtHome}-{realFtAway}
+                              <br />
+                              <span className="prediction-final-result">Final result: {realFtHome}-{realFtAway}</span>
+                            </p>
                           </section>
 
                           <section className="prediction-team-side prediction-team-side-away">

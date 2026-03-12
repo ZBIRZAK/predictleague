@@ -1363,6 +1363,14 @@ button:disabled {
   letter-spacing: 0.01em;
 }
 
+.prediction-final-result {
+  display: inline-block;
+  margin-top: 0.2rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #b8cbe8;
+}
+
 .prediction-score-row {
   display: grid;
   grid-template-columns: auto 1fr;
