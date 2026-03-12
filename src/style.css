@@ -401,6 +401,32 @@ body {
   color: #fff;
 }
 
+.guest-intro-panel .quick-status {
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+}
+
+.guest-intro-panel .quick-status .group-chip {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  color: #fff;
+  font-weight: 600;
+}
+
+.guest-intro-panel .quick-status > * {
+  display: inline-flex;
+  align-items: center;
+}
+
+.guest-intro-panel .quick-status > * + *::before {
+  content: '•';
+  color: rgba(255, 255, 255, 0.82);
+  margin: 0 0.42rem 0 0.08rem;
+}
+
 .guest-intro-panel .details-btn {
   background: rgba(255, 255, 255, 0.16);
   border-color: rgba(255, 255, 255, 0.45);
