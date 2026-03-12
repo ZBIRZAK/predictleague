@@ -988,6 +988,7 @@ function App() {
   const leaderboardTourRef = useRef<HTMLElement | null>(null);
   const inPageGuideSnapshotRef = useRef<GuideSnapshot | null>(null);
   const inPageGuideTimersRef = useRef<number[]>([]);
+  const guideActionIndexRef = useRef(0);
 
   const selectedGroup = useMemo(
     () => groups.find((group) => group.id === selectedGroupId) ?? null,
@@ -2611,6 +2612,7 @@ function App() {
     const leaderboardReady = clampedAction >= 16;
 
     setGuideActionIndex(clampedAction);
+    guideActionIndexRef.current = clampedAction;
     setInPageGuideStepIndex(actionDef.stepIndex);
 
     setGroupLeaderboardData(null);
@@ -2816,8 +2818,10 @@ function App() {
     setMessage(user ? 'Guide closed. Your real data is restored.' : 'Create an account to start.');
   }
 
-  function moveInPageGuideStep(nextStep: number) {
-    const clamped = Math.max(0, Math.min(GUIDE_LAST_ACTION_INDEX, nextStep));
+  function moveInPageGuideStep(nextStep: number | ((current: number) => number)) {
+    const current = guideActionIndexRef.current;
+    const requested = typeof nextStep === 'function' ? nextStep(current) : nextStep;
+    const clamped = Math.max(0, Math.min(GUIDE_LAST_ACTION_INDEX, requested));
     clearInPageGuideTimers();
     applyGuideAction(clamped);
   }
@@ -3642,7 +3646,7 @@ function App() {
                         type="button"
                         className="details-btn"
                         disabled={guideActionIndex === 0}
-                        onClick={() => moveInPageGuideStep(guideActionIndex - 1)}
+                        onClick={() => moveInPageGuideStep((current) => current - 1)}
                       >
                         Previous
                       </button>
@@ -3650,7 +3654,7 @@ function App() {
                         type="button"
                         className="details-btn"
                         disabled={guideActionIndex >= GUIDE_LAST_ACTION_INDEX}
-                        onClick={() => moveInPageGuideStep(guideActionIndex + 1)}
+                        onClick={() => moveInPageGuideStep((current) => current + 1)}
                       >
                         Next
                       </button>
@@ -4677,7 +4681,7 @@ function App() {
                 type="button"
                 className="details-btn"
                 disabled={guideActionIndex === 0}
-                onClick={() => moveInPageGuideStep(guideActionIndex - 1)}
+                onClick={() => moveInPageGuideStep((current) => current - 1)}
               >
                 Previous
               </button>
@@ -4687,7 +4691,7 @@ function App() {
                 onClick={() =>
                   guideActionIndex >= GUIDE_LAST_ACTION_INDEX
                     ? stopInPageGuide()
-                    : moveInPageGuideStep(guideActionIndex + 1)
+                    : moveInPageGuideStep((current) => current + 1)
                 }
               >
                 {guideActionIndex >= GUIDE_LAST_ACTION_INDEX ? 'Finish' : 'Next'}
