@@ -4226,11 +4226,11 @@ function App() {
                               </div>
                             </label>
                             {shouldShowRealResult ? (
-                              <p className="prediction-real-result">
-                                HT {realHtHome}-{realHtAway} | FT {realFtHome}-{realFtAway}
-                                <br />
-                                <span className="prediction-final-result">Final result: {realFtHome}-{realFtAway}</span>
-                              </p>
+                              <div className="prediction-real-result quick-status prediction-real-result-quick">
+                                <span>HT {realHtHome}-{realHtAway}</span>
+                                <span>FT {realFtHome}-{realFtAway}</span>
+                                <span className="prediction-final-result">Final {realFtHome}-{realFtAway}</span>
+                              </div>
                             ) : null}
                           </section>
 
