@@ -2988,16 +2988,15 @@ function App() {
               {!user ? (
                 <section className="filter-panel guest-intro-panel">
                   <p className="guest-intro-tag">Welcome to PredictLeague</p>
-                  <h2>Predict football scores with friends and climb the leaderboard</h2>
+                  <h2>Turn football matches into a competition with your friends.</h2>
                   <p className="guest-intro-copy">
-                    This is a daily football prediction game. Create a private group, invite friends, submit your HT/FT picks
-                    before kickoff, and earn points from correct results.
+                    Predict scores, earn points, and dominate the leaderboard.
                   </p>
                   <div className="quick-status">
-                    <span className="group-chip">Create group</span>
-                    <span className="group-chip">Invite friends</span>
-                    <span className="group-chip">Save predictions</span>
-                    <span className="group-chip">Win points</span>
+                    <span className="group-chip">Create your league</span>
+                    <span className="group-chip">Add friends</span>
+                    <span className="group-chip">Predict results</span>
+                    <span className="group-chip">Top the leaderboard</span>
                   </div>
                   <div className="auth-actions">
                     <button type="button" className="refresh" onClick={() => goToPage('game')}>
