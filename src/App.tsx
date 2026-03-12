@@ -697,7 +697,7 @@ function mapFirebaseAuthError(error: unknown, fallback: string) {
   return message || fallback;
 }
 
-function ImportantMatchCard({ match, onOpen }: { match: Match; onOpen: (match: Match) => Promise<void> }) {
+function ImportantMatchCard({ match, onOpen }: { match: Match; onOpen?: (match: Match) => Promise<void> }) {
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   useEffect(() => {
@@ -709,18 +709,8 @@ function ImportantMatchCard({ match, onOpen }: { match: Match; onOpen: (match: M
   const isUpcoming = ['SCHEDULED', 'TIMED'].includes(match.status) && !Number.isNaN(kickoffMs) && kickoffMs > nowMs;
   const countdown = isUpcoming ? formatCountdown(kickoffMs - nowMs) : match.status;
 
-  return (
-    <button
-      type="button"
-      className="important-feature-card"
-      onClick={() => void onOpen(match)}
-      style={
-        {
-          '--left-accent': getTeamAccentColor(match.homeTeam),
-          '--right-accent': getTeamAccentColor(match.awayTeam)
-        } as CSSProperties
-      }
-    >
+  const body = (
+    <>
       <span className="important-feature-head">
         <span className="important-feature-meta">
           <strong>{match.competition?.name ?? 'Competition'}</strong>
@@ -739,6 +729,38 @@ function ImportantMatchCard({ match, onOpen }: { match: Match; onOpen: (match: M
           <span className="team-name important-team-name">{match.awayTeam.name}</span>
         </span>
       </span>
+    </>
+  );
+
+  if (!onOpen) {
+    return (
+      <div
+        className="important-feature-card"
+        style={
+          {
+            '--left-accent': getTeamAccentColor(match.homeTeam),
+            '--right-accent': getTeamAccentColor(match.awayTeam)
+          } as CSSProperties
+        }
+      >
+        {body}
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      className="important-feature-card"
+      onClick={() => void onOpen(match)}
+      style={
+        {
+          '--left-accent': getTeamAccentColor(match.homeTeam),
+          '--right-accent': getTeamAccentColor(match.awayTeam)
+        } as CSSProperties
+      }
+    >
+      {body}
     </button>
   );
 }
@@ -1872,49 +1894,11 @@ function App() {
     return payload.team ?? payload;
   }
 
-  async function openMatchDetails(match: Match) {
-    setMatchDetailsOpen(true);
-    setMatchDetailsError('');
-    setActiveMatchDetails(match);
-    try {
-      setMatchDetailsLoading(true);
-      const fullMatch = await loadMatchById(match.id);
-      if (!fullMatch) {
-        setMatchDetailsError('Could not load full match details.');
-        return;
-      }
-      setActiveMatchDetails(fullMatch);
-
-      const teamIds = [fullMatch.homeTeam.id, fullMatch.awayTeam.id].filter((id): id is number => typeof id === 'number');
-      const missingTeamIds = teamIds.filter((teamId) => !teamDetailsById[teamId]);
-      if (missingTeamIds.length > 0) {
-        setTeamDetailsLoading(true);
-        const teamEntries = await Promise.all(
-          missingTeamIds.map(async (teamId) => {
-            const teamDetails = await loadTeamById(teamId);
-            return [teamId, teamDetails] as const;
-          })
-        );
-        const nextMap: Record<number, TeamDetails> = {};
-        for (const [teamId, teamDetails] of teamEntries) {
-          if (teamDetails) {
-            nextMap[teamId] = teamDetails;
-          }
-        }
-        setTeamDetailsById((prev) => ({ ...prev, ...nextMap }));
-      }
-    } catch (err) {
-      setMatchDetailsError(err instanceof Error ? err.message : 'Failed to load match details.');
-    } finally {
-      setMatchDetailsLoading(false);
-      setTeamDetailsLoading(false);
-    }
-  }
-
   function closeMatchDetails() {
     setMatchDetailsOpen(false);
     setMatchDetailsLoading(false);
     setMatchDetailsError('');
+    setActiveMatchDetails(null);
   }
 
   async function loadGroupLeaderboardData(groupId: string, scope: 'total' | 'weekly') {
@@ -3096,9 +3080,7 @@ function App() {
                 }
               >
                 {!importantMatch ? <p className="muted">No live/upcoming important match.</p> : null}
-                {importantMatch ? (
-                  <ImportantMatchCard match={importantMatch} onOpen={openMatchDetails} />
-                ) : null}
+                {importantMatch ? <ImportantMatchCard match={importantMatch} /> : null}
               </section>
 
               <section className="scoreboard">
@@ -3121,34 +3103,14 @@ function App() {
                       {group.matches.map((match) => (
                         // Use a composite key to avoid row/logo reuse if provider IDs collide across competitions.
                         <div
-                          className="match-row match-row-clickable"
+                          className="match-row"
                           key={`${match.id}-${match.utcDate}-${match.homeTeam.name}-${match.awayTeam.name}-${match.competition?.name ?? ''}`}
-                          role="button"
-                          tabIndex={0}
-                          onClick={() => void openMatchDetails(match)}
-                          onKeyDown={(event) => {
-                            if (event.key === 'Enter' || event.key === ' ') {
-                              event.preventDefault();
-                              void openMatchDetails(match);
-                            }
-                          }}
                         >
                           <div className="match-time">
                             <span className={`status-dot ${getStatusClass(match.status)}`} />
                             <span>{match.status === 'TIMED' ? kickoffTime(match.utcDate) : match.status}</span>
                           </div>
-                          <div
-                            className="teams-col match-row-clickable"
-                            role="button"
-                            tabIndex={0}
-                            onClick={() => void openMatchDetails(match)}
-                            onKeyDown={(event) => {
-                              if (event.key === 'Enter' || event.key === ' ') {
-                                event.preventDefault();
-                                void openMatchDetails(match);
-                              }
-                            }}
-                          >
+                          <div className="teams-col">
                             <div className="team-line">
                               <span className="team-name-wrap">
                                 {match.homeTeam.crest ? <img className="team-crest" src={match.homeTeam.crest} alt="" loading="lazy" /> : null}
