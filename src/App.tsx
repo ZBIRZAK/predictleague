@@ -2985,6 +2985,31 @@ function App() {
         {page === 'home' ? (
           <section className="home-grid">
             <div className="home-main">
+              {!user ? (
+                <section className="filter-panel guest-intro-panel">
+                  <p className="guest-intro-tag">Welcome to PredictLeague</p>
+                  <h2>Predict football scores with friends and climb the leaderboard</h2>
+                  <p className="guest-intro-copy">
+                    This is a daily football prediction game. Create a private group, invite friends, submit your HT/FT picks
+                    before kickoff, and earn points from correct results.
+                  </p>
+                  <div className="quick-status">
+                    <span className="group-chip">Create group</span>
+                    <span className="group-chip">Invite friends</span>
+                    <span className="group-chip">Save predictions</span>
+                    <span className="group-chip">Win points</span>
+                  </div>
+                  <div className="auth-actions">
+                    <button type="button" className="refresh" onClick={() => goToPage('game')}>
+                      Create Account
+                    </button>
+                    <button type="button" className="details-btn" onClick={startInPageGuide}>
+                      Watch How To Play Guide
+                    </button>
+                  </div>
+                </section>
+              ) : null}
+
               <section className="filter-panel">
                 <h2>Home Matches</h2>
                 <p className="muted">
