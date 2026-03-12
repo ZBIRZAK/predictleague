@@ -3517,7 +3517,7 @@ function App() {
               <section
                 ref={createGroupTourRef}
                 data-tour-id="create-group"
-                className={`filter-panel ${
+                className={`filter-panel create-group-panel ${
                   (!inPageGuideActive && gameTourActive && gameTourStep.id === 'create-group') ||
                   (inPageGuideActive && inPageGuideStepIndex === 0 && guideActionIndex <= 2)
                     ? 'guide-focus-target'
@@ -3525,7 +3525,7 @@ function App() {
                 }`}
               >
                 <h2>Create Group</h2>
-                <div className="selectors">
+                <div className="selectors create-group-selectors">
                   <label
                     className={
                       inPageGuideActive && guideActionIndex === 0

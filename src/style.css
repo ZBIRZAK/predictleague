@@ -542,6 +542,19 @@ body {
   align-items: end;
 }
 
+.create-group-selectors {
+  grid-template-columns: 1fr;
+}
+
+.create-group-selectors > label {
+  min-width: 0;
+}
+
+.create-group-selectors select,
+.create-group-selectors input {
+  width: 100%;
+}
+
 label {
   display: grid;
   gap: 0.25rem;
@@ -1048,19 +1061,22 @@ button:disabled {
 }
 
 .group-list {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
   gap: 0.45rem;
+  width: 100%;
 }
 
 .group-chip-row {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 0.2rem;
   border: 1px solid var(--line);
   background: #25314a;
   border-radius: 999px;
   padding: 0.16rem 0.2rem 0.16rem 0.58rem;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .group-chip-row-active {
@@ -1079,12 +1095,16 @@ button:disabled {
 }
 
 .group-chip-main {
+  flex: 1 1 auto;
   padding: 0.24rem 0.14rem 0.24rem 0;
   min-width: 0;
   max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.25;
 }
 
 .group-chip-delete {
@@ -1717,15 +1737,18 @@ button:disabled {
 }
 
 .game-side {
+  grid-column: 1;
   display: grid;
   gap: 1rem;
   align-content: start;
   min-width: 0;
-  width: 100%;
+  width: min(100%, 330px);
   max-width: 330px;
+  overflow: hidden;
 }
 
 .game-main {
+  grid-column: 2;
   display: grid;
   gap: 1rem;
   align-content: start;
@@ -2805,7 +2828,12 @@ button:disabled {
   }
 
   .game-side {
+    grid-column: auto;
     max-width: none;
+  }
+
+  .game-main {
+    grid-column: auto;
   }
 }
 
