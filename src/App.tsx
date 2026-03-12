@@ -203,6 +203,161 @@ type ResponsiblePlayForm = {
 type AppPage = 'home' | 'game' | 'profile';
 type ThemeMode = 'light' | 'dark';
 const SIGNUP_CODE_RESEND_SECONDS = 45;
+const GAME_TOUR_SEEN_KEY = 'predileague-game-tour-seen-v1';
+const GUIDE_DEMO_GROUP_ID = 'guide-demo-group-v1';
+const GUIDE_DEMO_MATCH_ID = 990001;
+const GUIDE_DEMO_USER_UID = 'guide-demo-user';
+
+type GameTourStepId = 'create-group' | 'invite-friends' | 'save-predictions';
+
+const GAME_TOUR_STEPS: Array<{ id: GameTourStepId; title: string; description: string }> = [
+  {
+    id: 'create-group',
+    title: 'Create your group',
+    description: 'Pick a name, choose match source, and create your first league with friends.'
+  },
+  {
+    id: 'invite-friends',
+    title: 'Invite friends',
+    description: 'Send invites by email. Friends join automatically after they sign in with that email.'
+  },
+  {
+    id: 'save-predictions',
+    title: 'Save your picks',
+    description: 'Set HT/FT scores, add optional bonus picks, then save all predictions before kickoff lock.'
+  }
+];
+
+const GUIDE_DEMO_GROUP_NAME = 'El Clasico Legends';
+const GUIDE_DEMO_INVITE_EMAIL = 'your.fiend@predileague.com';
+
+const IN_PAGE_GUIDE_STEPS = [
+  {
+    title: 'Create your group',
+    description: 'Create your group by entering a name, selecting a competition, and confirming creation.'
+  },
+  {
+    title: 'Invite your friend',
+    description: 'Invite your friend and follow the status from pending to accepted.'
+  },
+  {
+    title: 'Write, save, then lock',
+    description: 'Enter your prediction, save it, then review the lock rule before kickoff.'
+  },
+  {
+    title: 'See results and score',
+    description: 'After kickoff and when match is FINISHED, check results and the score of the group.'
+  },
+] as const;
+
+type GuideActionDefinition = {
+  stepIndex: 0 | 1 | 2 | 3;
+  popupMessage: string;
+  feedbackMessage: string;
+};
+
+const GUIDE_ACTIONS: GuideActionDefinition[] = [
+  {
+    stepIndex: 0,
+    popupMessage: 'Open Create Group and get ready to enter your group name.',
+    feedbackMessage: 'Action: Open Create Group and prepare to enter the group name.'
+  },
+  {
+    stepIndex: 0,
+    popupMessage: 'Select competition.',
+    feedbackMessage: 'Action: Select competition.'
+  },
+  {
+    stepIndex: 0,
+    popupMessage: 'Click Create to submit your group.',
+    feedbackMessage: 'Action: Click Create to submit your group.'
+  },
+  {
+    stepIndex: 0,
+    popupMessage: 'Check that your group appears in the Your Groups list.',
+    feedbackMessage: 'Action: Confirm your group appears in the Your Groups list.'
+  },
+  {
+    stepIndex: 1,
+    popupMessage: 'Open Invite Friends and get ready to enter your friend email.',
+    feedbackMessage: 'Action: Open Invite Friends and prepare to enter your friend email.'
+  },
+  {
+    stepIndex: 1,
+    popupMessage: 'Enter your friend email in the Friend Email field.',
+    feedbackMessage: 'Action: Enter your friend email in the Friend Email field.'
+  },
+  {
+    stepIndex: 1,
+    popupMessage: 'Click Invite and check that the status is pending.',
+    feedbackMessage: 'Action: Click Invite and confirm the status is pending.'
+  },
+  {
+    stepIndex: 1,
+    popupMessage: 'Status stays pending until your friend logs in, then it changes to accepted.',
+    feedbackMessage: 'Action: Wait for login, then verify status changes from pending to accepted.'
+  },
+  {
+    stepIndex: 2,
+    popupMessage: 'Go to today matches of the competition that you selected.',
+    feedbackMessage: 'Action: Go to today matches of the competition that you selected.'
+  },
+  {
+    stepIndex: 2,
+    popupMessage: 'Enter your HT and FT prediction values.',
+    feedbackMessage: 'Action: Enter your HT and FT prediction values.'
+  },
+  {
+    stepIndex: 2,
+    popupMessage: 'Click Save All Predictions to save your picks.',
+    feedbackMessage: 'Action: Click Save All Predictions to save your picks.'
+  },
+  {
+    stepIndex: 2,
+    popupMessage: 'Read the lock rule: match is locked 5 minutes before kickoff.',
+    feedbackMessage: 'Action: Review the lock rule: match is locked 5 minutes before kickoff.'
+  },
+  {
+    stepIndex: 3,
+    popupMessage: 'all groupe can see there prodictins after match kikoff',
+    feedbackMessage: 'Action: all groupe can see there prodictins after match kikoff.'
+  },
+  {
+    stepIndex: 3,
+    popupMessage: 'matche (FINISHED)',
+    feedbackMessage: 'Action: matche (FINISHED).'
+  },
+  {
+    stepIndex: 3,
+    popupMessage: 'Your friend result.',
+    feedbackMessage: 'Action: Check your friend result card and confirm points.'
+  },
+  {
+    stepIndex: 3,
+    popupMessage: 'your result',
+    feedbackMessage: 'Action: Check your result card and confirm points.'
+  },
+  {
+    stepIndex: 3,
+    popupMessage: 'score of the group',
+    feedbackMessage: 'Action: Check the score of the group in Leaderboard.'
+  }
+];
+
+const GUIDE_LAST_ACTION_INDEX = GUIDE_ACTIONS.length - 1;
+
+type GuideSnapshot = {
+  groups: AppGroup[];
+  selectedGroupId: string;
+  invites: GroupInvite[];
+  groupMembers: GroupMember[];
+  groupMatches: Match[];
+  myPredictions: Record<number, MatchPrediction>;
+  groupPredictionsByMatch: Record<number, MatchPrediction[]>;
+  predictionDrafts: Record<number, PredictionDraft>;
+  groupLeaderboardData: GroupLeaderboard | null;
+  groupBonusMatches: GroupBonusMatch[];
+};
 
 const statuses: Array<{ label: string; value: StatusFilter }> = [
   { label: 'All', value: '' },
@@ -792,11 +947,23 @@ function App() {
   const [selectedGroupCustomCompetitionFilter, setSelectedGroupCustomCompetitionFilter] = useState('');
   const [selectedGroupCustomCountryFilter, setSelectedGroupCustomCountryFilter] = useState('');
   const [customSelectionSaving, setCustomSelectionSaving] = useState(false);
-  const [perfectCongratsMatch, setPerfectCongratsMatch] = useState<string | null>(null);
   const [eventBoardVisibleByMatch, setEventBoardVisibleByMatch] = useState<Record<number, boolean>>({});
+  const [showGameTourPrompt, setShowGameTourPrompt] = useState(false);
+  const [gameTourActive, setGameTourActive] = useState(false);
+  const [gameTourStepIndex, setGameTourStepIndex] = useState(0);
+  const [tourLayoutTick, setTourLayoutTick] = useState(0);
+  const [inPageGuideActive, setInPageGuideActive] = useState(false);
+  const [inPageGuideStepIndex, setInPageGuideStepIndex] = useState(0);
+  const [guideActionIndex, setGuideActionIndex] = useState(0);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const shownPerfectCongratsRef = useRef<Set<string>>(new Set());
   const profileMenuRef = useRef<HTMLDivElement | null>(null);
+  const createGroupTourRef = useRef<HTMLElement | null>(null);
+  const inviteFriendsTourRef = useRef<HTMLElement | null>(null);
+  const savePredictionsTourRef = useRef<HTMLElement | null>(null);
+  const leaderboardTourRef = useRef<HTMLElement | null>(null);
+  const inPageGuideSnapshotRef = useRef<GuideSnapshot | null>(null);
+  const inPageGuideTimersRef = useRef<number[]>([]);
 
   const selectedGroup = useMemo(
     () => groups.find((group) => group.id === selectedGroupId) ?? null,
@@ -865,8 +1032,64 @@ function App() {
     [competitions]
   );
   const standingsCompetitions = useMemo(() => footballDataCompetitions, [footballDataCompetitions]);
+  const guideCompetitionId = useMemo(() => {
+    const primera = competitions.find(
+      (competition) => competition.name === 'Primera Division' && (competition.area?.name ?? '') === 'Spain'
+    );
+    if (primera) return String(primera.id);
+    const byId = competitions.find((competition) => competition.id === 2014);
+    if (byId) return String(byId.id);
+    return '2014';
+  }, [competitions]);
 
   const groupLeaderboard = groupLeaderboardData?.leaderboard ?? [];
+  const gameTourStep = GAME_TOUR_STEPS[gameTourStepIndex] ?? GAME_TOUR_STEPS[0];
+  const gameTourTarget = useMemo(() => {
+    if (!gameTourActive) return null;
+    if (gameTourStep.id === 'create-group') {
+      return createGroupTourRef.current ?? (document.querySelector('[data-tour-id="create-group"]') as HTMLElement | null);
+    }
+    if (gameTourStep.id === 'invite-friends') {
+      return inviteFriendsTourRef.current ?? (document.querySelector('[data-tour-id="invite-friends"]') as HTMLElement | null);
+    }
+    return (
+      savePredictionsTourRef.current ?? (document.querySelector('[data-tour-id="save-predictions"]') as HTMLElement | null)
+    );
+  }, [gameTourActive, gameTourStep.id, selectedGroup?.id, page, tourLayoutTick]);
+  const gameTourPopover = useMemo(() => {
+    if (!gameTourTarget) {
+      return {
+        placement: 'center' as const,
+        style: {
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)'
+        } satisfies CSSProperties
+      };
+    }
+
+    const rect = gameTourTarget.getBoundingClientRect();
+    const popoverWidth = Math.min(360, Math.max(280, window.innerWidth - 24));
+    const left = Math.min(Math.max(12, rect.left), Math.max(12, window.innerWidth - popoverWidth - 12));
+    const hasSpaceBelow = window.innerHeight - rect.bottom > 220;
+    if (hasSpaceBelow) {
+      return {
+        placement: 'below' as const,
+        style: {
+          top: rect.bottom + 12,
+          left
+        } satisfies CSSProperties
+      };
+    }
+
+    return {
+      placement: 'above' as const,
+      style: {
+        top: Math.max(12, rect.top - 190),
+        left
+      } satisfies CSSProperties
+    };
+  }, [gameTourTarget, tourLayoutTick]);
   const completedDraftCount = useMemo(() => {
     let total = 0;
     for (const match of groupMatches) {
@@ -963,6 +1186,78 @@ function App() {
       return true;
     });
   }, [newGroupCustomCompetitionFilter, newGroupCustomCountryFilter, newGroupCustomPool]);
+
+  const buildGuideDemoGroup = () =>
+    ({
+      id: GUIDE_DEMO_GROUP_ID,
+      name: GUIDE_DEMO_GROUP_NAME,
+      competition_id: 2014,
+      competition_name: 'Primera Division',
+      match_selection_mode: 'competition',
+      owner_uid: user?.uid ?? 'guide-owner',
+      prediction_lock_minutes: 5,
+      bonus_enabled: false,
+      created_at: new Date().toISOString()
+    }) satisfies AppGroup;
+
+  const buildGuideDemoMatch = (phase: 'OPEN' | 'LOCKED' | 'FINISHED'): Match => ({
+    id: GUIDE_DEMO_MATCH_ID,
+    utcDate:
+      phase === 'FINISHED'
+        ? new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
+        : phase === 'LOCKED'
+          ? new Date(Date.now() - 10 * 60 * 1000).toISOString()
+          : new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+    status: phase === 'FINISHED' ? 'FINISHED' : 'TIMED',
+    homeTeam: { id: 81, name: 'Barça', shortName: 'Barcelona', tla: 'BAR' },
+    awayTeam: { id: 86, name: 'Real Madrid', shortName: 'Real Madrid', tla: 'RMA' },
+    competition: { id: 2014, name: 'Primera Division', area: { name: 'Spain' } },
+    area: { name: 'Spain' },
+    score:
+      phase === 'FINISHED'
+        ? {
+            winner: 'HOME_TEAM',
+            halfTime: { home: 1, away: 0 },
+            fullTime: { home: 2, away: 1 }
+          }
+        : {
+            winner: null,
+            halfTime: { home: null, away: null },
+            fullTime: { home: null, away: null }
+          }
+  });
+
+  const buildGuideDemoPrediction = (): MatchPrediction => ({
+    id: 'guide-demo-prediction',
+    group_id: GUIDE_DEMO_GROUP_ID,
+    match_id: GUIDE_DEMO_MATCH_ID,
+    user_uid: GUIDE_DEMO_USER_UID,
+    match_date: today,
+    ht_home: 1,
+    ht_away: 0,
+    ft_home: 2,
+    ft_away: 1,
+    goal_players: [],
+    yellow_card_players: [],
+    red_card_players: [],
+    created_at: new Date().toISOString()
+  });
+
+  const buildGuideOwnerPrediction = (ownerUid: string): MatchPrediction => ({
+    id: 'guide-owner-prediction',
+    group_id: GUIDE_DEMO_GROUP_ID,
+    match_id: GUIDE_DEMO_MATCH_ID,
+    user_uid: ownerUid,
+    match_date: today,
+    ht_home: 1,
+    ht_away: 0,
+    ft_home: 2,
+    ft_away: 1,
+    goal_players: [],
+    yellow_card_players: [],
+    red_card_players: [],
+    created_at: new Date().toISOString()
+  });
 
   useEffect(() => {
     const onHashChange = () => {
@@ -1079,6 +1374,8 @@ function App() {
       setGroups([]);
       setSelectedGroupId('');
       setProfileRecord(null);
+      setShowGameTourPrompt(false);
+      setGameTourActive(false);
       setProfileMenuOpen(false);
       setProfileForm({
         firstName: '',
@@ -1097,6 +1394,60 @@ function App() {
   }, [user]);
 
   useEffect(() => {
+    if (page !== 'game' || !user) return;
+    const hasSeenTour = window.localStorage.getItem(GAME_TOUR_SEEN_KEY) === '1';
+    if (!hasSeenTour) {
+      setShowGameTourPrompt(true);
+    }
+  }, [page, user]);
+
+  useEffect(() => {
+    if (!inPageGuideActive) return;
+    if (page === 'game') return;
+    stopInPageGuide();
+  }, [inPageGuideActive, page]);
+
+  useEffect(() => {
+    if (!gameTourActive) return;
+    const onLayoutChange = () => setTourLayoutTick((prev) => prev + 1);
+    window.addEventListener('resize', onLayoutChange);
+    window.addEventListener('scroll', onLayoutChange, true);
+    onLayoutChange();
+    return () => {
+      window.removeEventListener('resize', onLayoutChange);
+      window.removeEventListener('scroll', onLayoutChange, true);
+    };
+  }, [gameTourActive]);
+
+  useEffect(() => {
+    if (!gameTourActive) return;
+    gameTourTarget?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+    setTourLayoutTick((prev) => prev + 1);
+  }, [gameTourActive, gameTourStepIndex, gameTourTarget]);
+
+  useEffect(() => {
+    if (!inPageGuideActive || page !== 'game') return;
+    const id = window.setTimeout(() => {
+      const target = getCurrentGuideTarget();
+      target?.scrollIntoView({
+        behavior: 'smooth',
+        block: window.innerWidth <= 800 ? 'start' : 'center',
+        inline: 'nearest'
+      });
+    }, 140);
+    return () => window.clearTimeout(id);
+  }, [inPageGuideActive, inPageGuideStepIndex, guideActionIndex, page, groups.length, selectedGroupId, invites.length, groupMatches.length]);
+
+  useEffect(() => {
+    return () => {
+      for (const timerId of inPageGuideTimersRef.current) {
+        window.clearTimeout(timerId);
+      }
+      inPageGuideTimersRef.current = [];
+    };
+  }, []);
+
+  useEffect(() => {
     if (!profileMenuOpen) return;
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target;
@@ -1109,7 +1460,8 @@ function App() {
   }, [profileMenuOpen]);
 
   useEffect(() => {
-    if (!user || !selectedGroup) {
+    const isGuestGuideDemo = inPageGuideActive && selectedGroup?.id === GUIDE_DEMO_GROUP_ID;
+    if (!selectedGroup || (!user && !isGuestGuideDemo)) {
       setGroupMatches([]);
       setSelectedGroupCustomMatches([]);
       setMyPredictions({});
@@ -1122,12 +1474,20 @@ function App() {
 
     setLockMinutesInput(String(selectedGroup.prediction_lock_minutes ?? 0));
     setBonusEnabledInput(Boolean(selectedGroup.bonus_enabled));
+    if (selectedGroup.id === GUIDE_DEMO_GROUP_ID) {
+      setGroupMatchesLoading(false);
+      return;
+    }
+    if (!user) return;
     void loadGroupData(user.uid, selectedGroup);
-  }, [selectedGroup, user, today]);
+  }, [selectedGroup, user, today, inPageGuideActive]);
 
   useEffect(() => {
     if (!selectedGroup) {
       setGroupLeaderboardData(null);
+      return;
+    }
+    if (selectedGroup.id === GUIDE_DEMO_GROUP_ID) {
       return;
     }
 
@@ -1135,7 +1495,7 @@ function App() {
   }, [leaderboardScope, selectedGroup?.id]);
 
   useEffect(() => {
-    if (page !== 'game' || !selectedGroup || !user) return;
+    if (page !== 'game' || !selectedGroup || !user || selectedGroup.id === GUIDE_DEMO_GROUP_ID) return;
 
     const tick = () => {
       if (document.visibilityState !== 'visible') return;
@@ -1172,7 +1532,6 @@ function App() {
       const key = `${selectedGroup.id}:${user.uid}:${match.id}`;
       if (shownPerfectCongratsRef.current.has(key)) continue;
       shownPerfectCongratsRef.current.add(key);
-      setPerfectCongratsMatch(`${match.homeTeam.name} vs ${match.awayTeam.name}`);
       break;
     }
   }, [groupMatches, myPredictions, selectedGroup, user]);
@@ -1948,6 +2307,10 @@ function App() {
   }
 
   async function handleCreateGroup() {
+    if (inPageGuideActive && selectedGroupId === GUIDE_DEMO_GROUP_ID) {
+      setMessage('Guide mode: use Next in the guide popup.');
+      return;
+    }
     if (!user?.email) {
       setError('Login with a valid email account.');
       return;
@@ -2031,6 +2394,10 @@ function App() {
   }
 
   async function handleInvite() {
+    if (inPageGuideActive && selectedGroupId === GUIDE_DEMO_GROUP_ID) {
+      setMessage('Guide mode: use Next in the guide popup.');
+      return;
+    }
     if (!user || !selectedGroup) {
       return;
     }
@@ -2139,6 +2506,10 @@ function App() {
   }
 
   async function handleSaveAllPredictions() {
+    if (inPageGuideActive && selectedGroupId === GUIDE_DEMO_GROUP_ID) {
+      setMessage('Guide mode: use Next in the guide popup.');
+      return;
+    }
     if (!user || !selectedGroup) {
       return;
     }
@@ -2217,6 +2588,266 @@ function App() {
     }
   }
 
+  function markGameTourSeen() {
+    window.localStorage.setItem(GAME_TOUR_SEEN_KEY, '1');
+  }
+
+  function clearInPageGuideTimers() {
+    for (const timerId of inPageGuideTimersRef.current) {
+      window.clearTimeout(timerId);
+    }
+    inPageGuideTimersRef.current = [];
+  }
+
+  function applyGuideAction(action: number) {
+    const clampedAction = Math.max(0, Math.min(GUIDE_LAST_ACTION_INDEX, action));
+    const actionDef = GUIDE_ACTIONS[clampedAction] ?? GUIDE_ACTIONS[0];
+    const demoGroup = buildGuideDemoGroup();
+    const ownerUid = user?.uid ?? 'guide-owner';
+    const ownerEmail = 'your.email@predileague.com';
+    const ownerPrediction = buildGuideOwnerPrediction(ownerUid);
+    const demoPrediction = buildGuideDemoPrediction();
+
+    const hasCreatedGroup = clampedAction >= 3;
+    const inviteTyped = clampedAction >= 5;
+    const invitePending = clampedAction >= 6;
+    const inviteAccepted = clampedAction >= 7;
+    const predictionPrepared = clampedAction >= 8;
+    const predictionWritten = clampedAction >= 9;
+    const predictionSaved = clampedAction >= 10;
+    const locked = clampedAction >= 11;
+    const finished = clampedAction >= 13;
+    const leaderboardReady = clampedAction >= 16;
+
+    setGuideActionIndex(clampedAction);
+    setInPageGuideStepIndex(actionDef.stepIndex);
+
+    setGroupLeaderboardData(null);
+    setGroupBonusMatches([]);
+    setBusy(clampedAction === 2);
+    setInviteSending(clampedAction === 6);
+    setSavingAll(clampedAction === 10);
+    setNewGroupMatchMode('competition');
+    setNewGroupName(clampedAction >= 1 && clampedAction < 3 ? GUIDE_DEMO_GROUP_NAME : '');
+    setNewGroupCompetitionId(clampedAction >= 1 && clampedAction < 3 ? guideCompetitionId : '');
+    setInviteEmail(inviteTyped ? GUIDE_DEMO_INVITE_EMAIL : '');
+
+    setGroups((prev) => {
+      const withoutDemo = prev.filter((group) => group.id !== GUIDE_DEMO_GROUP_ID);
+      if (!hasCreatedGroup) return withoutDemo;
+      return [demoGroup, ...withoutDemo];
+    });
+    setSelectedGroupId(hasCreatedGroup ? GUIDE_DEMO_GROUP_ID : '');
+
+    setGroupMembers(() => {
+      if (!hasCreatedGroup) return [];
+      const baseMembers: GroupMember[] = [
+        {
+          group_id: GUIDE_DEMO_GROUP_ID,
+          user_uid: ownerUid,
+          email: ownerEmail,
+          role: 'owner',
+          created_at: new Date().toISOString()
+        }
+      ];
+      if (inviteAccepted) {
+        baseMembers.push({
+          group_id: GUIDE_DEMO_GROUP_ID,
+          user_uid: GUIDE_DEMO_USER_UID,
+          email: GUIDE_DEMO_INVITE_EMAIL,
+          role: 'member',
+          created_at: new Date().toISOString()
+        });
+      }
+      return baseMembers;
+    });
+
+    setInvites(() => {
+      if (!invitePending) return [];
+      return [
+        {
+          id: 'guide-demo-invite',
+          group_id: GUIDE_DEMO_GROUP_ID,
+          email: GUIDE_DEMO_INVITE_EMAIL,
+          invited_by_uid: ownerUid,
+          status: inviteAccepted ? 'accepted' : 'pending',
+          created_at: new Date().toISOString(),
+          accepted_at: inviteAccepted ? new Date().toISOString() : null
+        }
+      ];
+    });
+
+    setGroupMatches(() => {
+      if (!predictionPrepared) return [];
+      if (finished) return [buildGuideDemoMatch('FINISHED')];
+      if (locked) return [buildGuideDemoMatch('LOCKED')];
+      return [buildGuideDemoMatch('OPEN')];
+    });
+
+    const nextDrafts: Record<number, PredictionDraft> = {};
+    if (predictionPrepared) {
+      nextDrafts[GUIDE_DEMO_MATCH_ID] = {
+        htHome: predictionWritten ? '1' : '',
+        htAway: predictionWritten ? '0' : '',
+        ftHome: predictionWritten ? '2' : '',
+        ftAway: predictionWritten ? '1' : '',
+        goalPlayersHome: '',
+        goalPlayersAway: '',
+        yellowCardPlayersHome: '',
+        yellowCardPlayersAway: '',
+        redCardPlayersHome: '',
+        redCardPlayersAway: ''
+      };
+    }
+    setPredictionDrafts(nextDrafts);
+
+    setMyPredictions(predictionSaved ? { [GUIDE_DEMO_MATCH_ID]: ownerPrediction } : {});
+
+    const nextPredictionsByMatch: Record<number, MatchPrediction[]> = {};
+    if (predictionSaved) {
+      nextPredictionsByMatch[GUIDE_DEMO_MATCH_ID] = locked || finished ? [demoPrediction, ownerPrediction] : [ownerPrediction];
+    }
+    setGroupPredictionsByMatch(nextPredictionsByMatch);
+
+    setGroupLeaderboardData(
+      leaderboardReady
+        ? {
+            scope: leaderboardScope,
+            weekStart: today,
+            weekEnd: today,
+            leaderboard: [
+              {
+                rank: 1,
+                user_uid: GUIDE_DEMO_USER_UID,
+                email: GUIDE_DEMO_INVITE_EMAIL,
+                points: 5,
+                winner_count: 1,
+                exact_ht_count: 1,
+                exact_ft_count: 1,
+                streak_days: 1,
+                earliest_submission: new Date().toISOString()
+              },
+              {
+                rank: 2,
+                user_uid: ownerUid,
+                email: ownerEmail,
+                points: 5,
+                winner_count: 1,
+                exact_ht_count: 1,
+                exact_ft_count: 1,
+                streak_days: 1,
+                earliest_submission: new Date().toISOString()
+              }
+            ],
+            rounds: [{ round: 1, total_points: 10 }]
+          }
+        : null
+    );
+
+    setMessage(actionDef.feedbackMessage);
+  }
+
+  function startInPageGuide() {
+    if (page !== 'game') {
+      goToPage('game');
+    }
+    markGameTourSeen();
+    setShowGameTourPrompt(false);
+    setGameTourActive(false);
+    setInviteSending(false);
+    setBusy(false);
+    setSavingAll(false);
+
+    if (!inPageGuideSnapshotRef.current) {
+      inPageGuideSnapshotRef.current = {
+        groups,
+        selectedGroupId,
+        invites,
+        groupMembers,
+        groupMatches,
+        myPredictions,
+        groupPredictionsByMatch,
+        predictionDrafts,
+        groupLeaderboardData,
+        groupBonusMatches
+      };
+    }
+
+    clearInPageGuideTimers();
+    setInPageGuideActive(true);
+    applyGuideAction(0);
+  }
+
+  function startSpotlightGuideDemo() {
+    startInPageGuide();
+  }
+
+  function getCurrentGuideTarget() {
+    if (guideActionIndex >= 16) {
+      return leaderboardTourRef.current ?? (document.querySelector('[data-tour-id="leaderboard"]') as HTMLElement | null);
+    }
+    if (guideActionIndex >= 8) {
+      return savePredictionsTourRef.current ?? (document.querySelector('[data-tour-id="save-predictions"]') as HTMLElement | null);
+    }
+    if (guideActionIndex >= 4) {
+      return inviteFriendsTourRef.current ?? (document.querySelector('[data-tour-id="invite-friends"]') as HTMLElement | null);
+    }
+    return createGroupTourRef.current ?? (document.querySelector('[data-tour-id="create-group"]') as HTMLElement | null);
+  }
+
+  function stopInPageGuide() {
+    clearInPageGuideTimers();
+    setInPageGuideActive(false);
+    setInPageGuideStepIndex(0);
+    setGuideActionIndex(0);
+    setGameTourActive(false);
+    setInviteSending(false);
+    setInviteEmail('');
+    setBusy(false);
+    setSavingAll(false);
+    const snapshot = inPageGuideSnapshotRef.current;
+    if (snapshot) {
+      setGroups(snapshot.groups);
+      setSelectedGroupId(snapshot.selectedGroupId);
+      setInvites(snapshot.invites);
+      setGroupMembers(snapshot.groupMembers);
+      setGroupMatches(snapshot.groupMatches);
+      setMyPredictions(snapshot.myPredictions);
+      setGroupPredictionsByMatch(snapshot.groupPredictionsByMatch);
+      setPredictionDrafts(snapshot.predictionDrafts);
+      setGroupLeaderboardData(snapshot.groupLeaderboardData);
+      setGroupBonusMatches(snapshot.groupBonusMatches);
+    }
+    inPageGuideSnapshotRef.current = null;
+    setMessage(user ? 'Guide closed. Your real data is restored.' : 'Create an account to start.');
+  }
+
+  function moveInPageGuideStep(nextStep: number) {
+    const clamped = Math.max(0, Math.min(GUIDE_LAST_ACTION_INDEX, nextStep));
+    clearInPageGuideTimers();
+    applyGuideAction(clamped);
+  }
+
+  function handleDismissGameTourPrompt() {
+    markGameTourSeen();
+    setShowGameTourPrompt(false);
+  }
+
+  function handleCloseGameTour() {
+    markGameTourSeen();
+    setGameTourActive(false);
+  }
+
+  function handleNextGameTourStep() {
+    setGameTourStepIndex((prev) => {
+      if (prev >= GAME_TOUR_STEPS.length - 1) {
+        handleCloseGameTour();
+        return prev;
+      }
+      return prev + 1;
+    });
+  }
+
   function goToPage(nextPage: AppPage) {
     const nextHash = nextPage === 'game' ? '#/game' : nextPage === 'profile' ? '#/profile' : '#/';
     if (window.location.hash !== nextHash) {
@@ -2245,9 +2876,15 @@ function App() {
   const profileDisplayName =
     profileRecord?.display_name?.trim() || user?.displayName?.trim() || user?.email?.split('@')[0] || 'User';
   const profileInitial = profileDisplayName.charAt(0).toUpperCase();
+  const currentGuideAction = GUIDE_ACTIONS[guideActionIndex] ?? GUIDE_ACTIONS[0];
+  const nextGuideAction = GUIDE_ACTIONS[Math.min(guideActionIndex + 1, GUIDE_LAST_ACTION_INDEX)] ?? GUIDE_ACTIONS[0];
+  const currentGuideStepMeta =
+    IN_PAGE_GUIDE_STEPS[inPageGuideStepIndex] ?? IN_PAGE_GUIDE_STEPS[IN_PAGE_GUIDE_STEPS.length - 1];
+  const shouldShowGameAuth = page === 'game' && !user && !inPageGuideActive;
+  const shouldShowGameWorkspace = page === 'game' && (Boolean(user) || inPageGuideActive);
 
   return (
-    <div className="app">
+    <div className={`app ${inPageGuideActive ? 'app-guide-active' : ''}`}>
       <header className="topbar">
         <div className="topbar-inner">
           <div className="topbar-brand">
@@ -2279,6 +2916,14 @@ function App() {
           </nav>
 
           <div className="topbar-action">
+            <button
+              type="button"
+              className="chip"
+              onClick={startInPageGuide}
+              title="Start complete how to play guide on this page"
+            >
+              How To Play Guide
+            </button>
             <button
               type="button"
               className="chip theme-toggle"
@@ -2645,7 +3290,7 @@ function App() {
           </section>
         ) : null}
 
-        {page === 'game' && !user ? (
+        {shouldShowGameAuth ? (
           <section className="auth-shell">
             <article className="auth-hero">
               <p className="box-label">PredictLeague</p>
@@ -2841,13 +3486,29 @@ function App() {
           </section>
         ) : null}
 
-        {page === 'game' && user ? (
+        {shouldShowGameWorkspace ? (
           <section className="game-grid">
             <div className="game-side">
-              <section className="filter-panel">
+              <section
+                ref={createGroupTourRef}
+                data-tour-id="create-group"
+                className={`filter-panel ${
+                  (!inPageGuideActive && gameTourActive && gameTourStep.id === 'create-group') ||
+                  (inPageGuideActive && inPageGuideStepIndex === 0 && guideActionIndex <= 2)
+                    ? 'guide-focus-target'
+                    : ''
+                }`}
+              >
                 <h2>Create Group</h2>
                 <div className="selectors">
-                  <label>
+                  <label
+                    className={
+                      inPageGuideActive && guideActionIndex === 0
+                        ? 'guide-arrow-target guide-arrow-target-field'
+                        : undefined
+                    }
+                    data-guide-arrow={inPageGuideActive && guideActionIndex === 0 ? 'Start writing group name' : undefined}
+                  >
                     Group Name
                     <input value={newGroupName} onChange={(e) => setNewGroupName(e.target.value)} placeholder="Weekend League" />
                   </label>
@@ -2859,7 +3520,14 @@ function App() {
                     </select>
                   </label>
                   {newGroupMatchMode === 'competition' ? (
-                  <label>
+                  <label
+                    className={
+                      inPageGuideActive && guideActionIndex === 1
+                        ? 'guide-arrow-target guide-arrow-target-field'
+                        : undefined
+                    }
+                    data-guide-arrow={inPageGuideActive && guideActionIndex === 1 ? 'Select a competition' : undefined}
+                  >
                     Competition
                     <select value={newGroupCompetitionId} onChange={(e) => setNewGroupCompetitionId(e.target.value)}>
                       <option value="">Select competition</option>
@@ -2882,7 +3550,7 @@ function App() {
                     disabled={busy}
                     onClick={() => void handleCreateGroup()}
                   >
-                    Create
+                    {busy ? 'Creating...' : 'Create'}
                   </button>
                 </div>
                 {newGroupMatchMode === 'custom' ? (
@@ -2951,6 +3619,53 @@ function App() {
                 ) : null}
               </section>
 
+              {/* <section className={`filter-panel in-page-guide-panel ${inPageGuideActive ? 'in-page-guide-panel-active' : ''}`}>
+                <h2>How To Play Guide</h2>
+                <p className="muted">Practice the full flow on this page with safe demo data. Your real data is restored when you stop.</p>
+                <div className="quick-status">
+                  <span className="group-chip">
+                    Step {inPageGuideStepIndex + 1}/{IN_PAGE_GUIDE_STEPS.length}
+                  </span>
+                  <span className="group-chip">{IN_PAGE_GUIDE_STEPS[inPageGuideStepIndex].title}</span>
+                </div>
+                <p className="muted">{IN_PAGE_GUIDE_STEPS[inPageGuideStepIndex].description}</p>
+                <div className="auth-actions">
+                  <button type="button" className="refresh" onClick={startInPageGuide}>
+                    {inPageGuideActive ? 'Restart Guide' : 'Start Guide Demo'}
+                  </button>
+                  <button
+                    type="button"
+                    className="details-btn"
+                    onClick={startSpotlightGuideDemo}
+                  >
+                    Run Spotlight Demo
+                  </button>
+                  {inPageGuideActive ? (
+                    <>
+                      <button
+                        type="button"
+                        className="details-btn"
+                        disabled={guideActionIndex === 0}
+                        onClick={() => moveInPageGuideStep(guideActionIndex - 1)}
+                      >
+                        Previous
+                      </button>
+                      <button
+                        type="button"
+                        className="details-btn"
+                        disabled={guideActionIndex >= GUIDE_LAST_ACTION_INDEX}
+                        onClick={() => moveInPageGuideStep(guideActionIndex + 1)}
+                      >
+                        Next
+                      </button>
+                      <button type="button" className="details-btn" onClick={stopInPageGuide}>
+                        Stop Guide
+                      </button>
+                    </>
+                  ) : null}
+                </div>
+              </section> */}
+
               <section className="filter-panel">
                 <h2>Your Groups</h2>
                 <div className="group-list">
@@ -2958,7 +3673,14 @@ function App() {
                   {groups.map((group) => (
                     <div
                       key={group.id}
-                      className={`group-chip-row ${group.id === selectedGroupId ? 'group-chip-row-active' : ''}`}
+                      className={`group-chip-row ${group.id === selectedGroupId ? 'group-chip-row-active' : ''} ${
+                        inPageGuideActive &&
+                        guideActionIndex === 3 &&
+                        group.id === GUIDE_DEMO_GROUP_ID &&
+                        selectedGroupId === GUIDE_DEMO_GROUP_ID
+                          ? 'guide-focus-target'
+                          : ''
+                      }`}
                     >
                       <button
                         type="button"
@@ -2985,10 +3707,25 @@ function App() {
               </section>
 
               {selectedGroup ? (
-                <section className="filter-panel">
+                <section
+                  ref={inviteFriendsTourRef}
+                  data-tour-id="invite-friends"
+                  className={`filter-panel ${
+                    (!inPageGuideActive && gameTourActive && gameTourStep.id === 'invite-friends')
+                      ? 'guide-focus-target'
+                      : ''
+                  }`}
+                >
                   <h2>Invite Friends</h2>
                   <div className="selectors">
-                  <label>
+                  <label
+                    className={
+                      inPageGuideActive && guideActionIndex === 4
+                        ? 'guide-arrow-target guide-arrow-target-field'
+                        : undefined
+                    }
+                    data-guide-arrow={inPageGuideActive && guideActionIndex === 4 ? "Type your friend's email" : undefined}
+                  >
                     Friend Email
                     <input
                       value={inviteEmail}
@@ -2999,7 +3736,8 @@ function App() {
                   </label>
                     <button
                       type="button"
-                      className="refresh"
+                      className={`refresh ${inPageGuideActive && guideActionIndex === 5 ? 'guide-arrow-target guide-arrow-inline' : ''}`}
+                      data-guide-arrow={inPageGuideActive && guideActionIndex === 5 ? 'Click Invite' : undefined}
                       disabled={inviteSending || !normalizedInviteEmail}
                       onClick={() => void handleInvite()}
                     >
@@ -3010,7 +3748,28 @@ function App() {
                     {invites.length === 0 ? <p className="muted">No invites yet.</p> : null}
                     {invites.map((invite) => (
                       <p key={invite.id}>
-                        {invite.email} - <strong>{invite.status}</strong>
+                        <span>{invite.email}</span>{' '}
+                        -{' '}
+                        <strong
+                          className={
+                            inPageGuideActive &&
+                            (guideActionIndex === 6 || guideActionIndex === 7) &&
+                            invite.id === 'guide-demo-invite'
+                              ? 'guide-arrow-target guide-arrow-inline'
+                              : undefined
+                          }
+                          data-guide-arrow={
+                            inPageGuideActive &&
+                            (guideActionIndex === 6 || guideActionIndex === 7) &&
+                            invite.id === 'guide-demo-invite'
+                              ? invite.status === 'pending'
+                                ? 'Status: pending'
+                                : 'Status: accepted'
+                              : undefined
+                          }
+                        >
+                          {invite.status}
+                        </strong>
                       </p>
                     ))}
                   </div>
@@ -3187,7 +3946,11 @@ function App() {
               ) : null}
 
               {selectedGroup ? (
-                <section className="filter-panel">
+                <section
+                  ref={leaderboardTourRef}
+                  data-tour-id="leaderboard"
+                  className={`filter-panel ${inPageGuideActive && guideActionIndex === 16 ? 'guide-focus-target' : ''}`}
+                >
                   <h2>Leaderboard ({leaderboardScope === 'weekly' ? 'Weekly' : 'Total'})</h2>
                   <div className="quick-status">
                     <button
@@ -3238,6 +4001,11 @@ function App() {
 
               <section className="filter-panel points-guide">
                 <h2>How Points Work</h2>
+                <div className="auth-actions">
+                  <button type="button" className="details-btn" onClick={startInPageGuide}>
+                    Start Full How To Play Guide
+                  </button>
+                </div>
                 <div className="points-list">
                   <p>Winner correct: <strong>+1</strong></p>
                   <p>Half-time exact score: <strong>+1</strong></p>
@@ -3257,7 +4025,16 @@ function App() {
               ) : null}
 
               {selectedGroup ? (
-                <section className="filter-panel game-summary">
+                <section
+                  ref={savePredictionsTourRef}
+                  data-tour-id="save-predictions"
+                  className={`filter-panel game-summary ${
+                    (!inPageGuideActive && gameTourActive && gameTourStep.id === 'save-predictions') ||
+                    (inPageGuideActive && guideActionIndex === 9)
+                      ? 'guide-focus-target'
+                      : ''
+                  }`}
+                >
                   <h2>
                     Prediction Board - {selectedGroup.match_selection_mode === 'custom' ? 'Custom Matches' : selectedGroup.competition_name}
                   </h2>
@@ -3269,7 +4046,10 @@ function App() {
                   </div>
                   <button
                     type="button"
-                    className="refresh"
+                    className={`refresh ${
+                      inPageGuideActive && guideActionIndex === 10 ? 'guide-focus-target guide-arrow-target guide-arrow-inline' : ''
+                    }`}
+                    data-guide-arrow={inPageGuideActive && guideActionIndex === 10 ? 'Click Save All Predictions' : undefined}
                     disabled={savingAll || busy || groupMatchesLoading}
                     onClick={() => void handleSaveAllPredictions()}
                   >
@@ -3304,6 +4084,7 @@ function App() {
                     const isOpenForPrediction = isMatchOpenForPrediction(match, selectedGroup.prediction_lock_minutes);
                     const shouldReveal = !isOpenForPrediction;
                     const memberEmailByUid = Object.fromEntries(groupMembers.map((member) => [member.user_uid, member.email]));
+                    const guideOwnerUid = user?.uid ?? 'guide-owner';
                     const realFtHome = match.score?.fullTime?.home ?? '-';
                     const realFtAway = match.score?.fullTime?.away ?? '-';
                     const matchLabel = `${match.homeTeam.name} vs ${match.awayTeam.name}`;
@@ -3321,11 +4102,31 @@ function App() {
                       match.awayTeam.id !== undefined ? teamDetailsById[match.awayTeam.id]?.squad?.map((p) => p.name ?? '').filter(Boolean) ?? [] : [];
 
                     return (
-                      <article className="league-card prediction-card" key={match.id}>
+                      <article
+                        className={`league-card prediction-card ${
+                          inPageGuideActive &&
+                          (guideActionIndex === 8 || guideActionIndex === 9) &&
+                          match.id === GUIDE_DEMO_MATCH_ID
+                            ? 'guide-focus-target'
+                            : ''
+                        }`}
+                        key={match.id}
+                      >
                         <div className="prediction-head prediction-head-modern">
                           <div className="match-time">
                             <span className={`status-dot ${getStatusClass(match.status)}`} />
-                            <span>{match.status === 'TIMED' ? kickoffTime(match.utcDate) : match.status}</span>
+                            <span
+                              className={
+                                inPageGuideActive && guideActionIndex === 13 && match.id === GUIDE_DEMO_MATCH_ID
+                                  ? 'guide-arrow-target guide-arrow-inline'
+                                  : undefined
+                              }
+                              data-guide-arrow={
+                                inPageGuideActive && guideActionIndex === 13 && match.id === GUIDE_DEMO_MATCH_ID ? 'FINISHED' : undefined
+                              }
+                            >
+                              {match.status === 'TIMED' ? kickoffTime(match.utcDate) : match.status}
+                            </span>
                           </div>
                           <span className="prediction-kickoff">{formatMatchDateTime(match.utcDate)}</span>
                         </div>
@@ -3574,19 +4375,46 @@ function App() {
                         </div>
                         ) : null}
                         {!isOpenForPrediction ? (
-                          <p className="saved-line prediction-lock-alert">
-                            Predictions locked for this match.
+                          <p
+                            className={`saved-line prediction-lock-alert ${
+                              inPageGuideActive && guideActionIndex === 11 && match.id === GUIDE_DEMO_MATCH_ID
+                                ? 'guide-focus-target'
+                                : ''
+                            }`}
+                          >
+                            Match locked 5 minutes before kickoff.
                           </p>
                         ) : null}
                         {shouldReveal ? (
-                          <div className="reveal-list">
+                          <div
+                            className={`reveal-list ${
+                              inPageGuideActive && guideActionIndex === 12 && match.id === GUIDE_DEMO_MATCH_ID
+                                ? 'guide-focus-target guide-arrow-target'
+                                : ''
+                            }`}
+                            data-guide-arrow={
+                              inPageGuideActive && guideActionIndex === 12 && match.id === GUIDE_DEMO_MATCH_ID
+                                ? 'Group predictions'
+                                : undefined
+                            }
+                          >
                             {matchPredictions.map((item) => {
                               const points = calculatePredictionPoints(match, item);
                               const itemGoalSplit = splitTeamPlayerPicks(item.goal_players);
                               const itemYellowSplit = splitTeamPlayerPicks(item.yellow_card_players);
                               const itemRedSplit = splitTeamPlayerPicks(item.red_card_players);
                               return (
-                                <article className="reveal-card" key={item.id}>
+                                <article
+                                  className={`reveal-card ${
+                                    inPageGuideActive &&
+                                    match.id === GUIDE_DEMO_MATCH_ID &&
+                                    ((guideActionIndex === 14 && item.user_uid === GUIDE_DEMO_USER_UID) ||
+                                      (guideActionIndex === 15 && item.user_uid === guideOwnerUid))
+                                      ? 'guide-focus-target'
+                                      : ''
+                                  }`}
+                                  key={item.id}
+                                >
                                   <div className="reveal-card-head">
                                     <strong>{memberEmailByUid[item.user_uid] ?? item.user_uid}</strong>
                                     {points.ready ? <span className="reveal-points">{points.total} pts</span> : null}
@@ -3772,6 +4600,104 @@ function App() {
               </>
             )}
           </section>
+        ) : null}
+
+        {showGameTourPrompt && page === 'game' && user ? (
+          <div className="modal-overlay" onClick={handleDismissGameTourPrompt}>
+            <section className="modal game-tour-intro-modal" onClick={(event) => event.stopPropagation()}>
+              <header className="modal-header">
+                <h3>Now, how to play?</h3>
+                <button type="button" onClick={handleDismissGameTourPrompt}>
+                  Close
+                </button>
+              </header>
+              <p className="game-tour-intro-text">
+                Take a quick tour to learn how to create a group, invite friends, and save predictions to win more points.
+              </p>
+              <div className="auth-actions">
+                <button type="button" className="refresh" onClick={startSpotlightGuideDemo}>
+                  Yes, show me
+                </button>
+                <button type="button" className="details-btn" onClick={handleDismissGameTourPrompt}>
+                  Maybe later
+                </button>
+              </div>
+            </section>
+          </div>
+        ) : null}
+
+        {inPageGuideActive && page === 'game' ? (
+          <section className="guide-flow-popup" role="dialog" aria-label="How to play guide">
+            <div className="guide-flow-chip">
+              Step {inPageGuideStepIndex + 1} / {IN_PAGE_GUIDE_STEPS.length} · Action {guideActionIndex + 1}/{GUIDE_ACTIONS.length}
+            </div>
+            <h3>How To Play Guide</h3>
+            <strong>{currentGuideStepMeta.title}</strong>
+            <p>{currentGuideStepMeta.description}</p>
+            <p className="guide-flow-message">
+              <strong>Current:</strong> {currentGuideAction.popupMessage}
+            </p>
+            {guideActionIndex < GUIDE_LAST_ACTION_INDEX ? (
+              <p className="guide-flow-next">
+                <strong>Next:</strong> {nextGuideAction.popupMessage}
+              </p>
+            ) : null}
+            <div className="guide-flow-actions">
+              <button
+                type="button"
+                className="details-btn"
+                disabled={guideActionIndex === 0}
+                onClick={() => moveInPageGuideStep(guideActionIndex - 1)}
+              >
+                Previous
+              </button>
+              <button
+                type="button"
+                className="refresh"
+                onClick={() =>
+                  guideActionIndex >= GUIDE_LAST_ACTION_INDEX
+                    ? stopInPageGuide()
+                    : moveInPageGuideStep(guideActionIndex + 1)
+                }
+              >
+                {guideActionIndex >= GUIDE_LAST_ACTION_INDEX ? 'Finish' : 'Next'}
+              </button>
+              <button type="button" className="details-btn" onClick={stopInPageGuide}>
+                Stop
+              </button>
+            </div>
+          </section>
+        ) : null}
+
+        {gameTourActive && !inPageGuideActive ? (
+          <div className="game-tour-overlay" aria-hidden="true">
+            <section className={`game-tour-popover game-tour-popover-${gameTourPopover.placement}`} style={gameTourPopover.style}>
+              <div className="game-tour-step-chip">
+                Step {gameTourStepIndex + 1} of {GAME_TOUR_STEPS.length}
+              </div>
+              <h3>{gameTourStep.title}</h3>
+              <p>{gameTourStep.description}</p>
+              {!gameTourTarget ? (
+                <p className="game-tour-missing-note">This section appears after selecting or creating a group.</p>
+              ) : null}
+              <div className="game-tour-actions">
+                <button
+                  type="button"
+                  className="details-btn"
+                  disabled={gameTourStepIndex === 0}
+                  onClick={() => setGameTourStepIndex((prev) => Math.max(0, prev - 1))}
+                >
+                  Back
+                </button>
+                <button type="button" className="details-btn" onClick={handleCloseGameTour}>
+                  Skip
+                </button>
+                <button type="button" className="refresh" onClick={handleNextGameTourStep}>
+                  {gameTourStepIndex === GAME_TOUR_STEPS.length - 1 ? 'Finish' : 'Next'}
+                </button>
+              </div>
+            </section>
+          </div>
         ) : null}
 
         {matchDetailsOpen ? (
@@ -3992,7 +4918,7 @@ function App() {
           </div>
         ) : null}
 
-        {perfectCongratsMatch ? (
+        {/* {perfectCongratsMatch ? (
           <div className="modal-overlay" onClick={() => setPerfectCongratsMatch(null)}>
             <section className="modal congrats-modal" onClick={(event) => event.stopPropagation()}>
               <header className="modal-header">
@@ -4006,7 +4932,7 @@ function App() {
               </p>
             </section>
           </div>
-        ) : null}
+        ) : null} */}
 
         {error ? <p className="error">{error}</p> : null}
         {message ? <p className="status-message">{message}</p> : null}
