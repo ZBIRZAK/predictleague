@@ -4104,6 +4104,13 @@ function App() {
                     const realHtAway = match.score?.halfTime?.away ?? '-';
                     const realFtHome = match.score?.fullTime?.home ?? '-';
                     const realFtAway = match.score?.fullTime?.away ?? '-';
+                    const statusUpper = String(match.status ?? '').toUpperCase();
+                    const kickoffMs = Date.parse(match.utcDate);
+                    const hasStartedByClock = !Number.isNaN(kickoffMs) && Date.now() >= kickoffMs;
+                    const hasStartedByStatus =
+                      LIVE_MATCH_STATUSES.has(statusUpper) ||
+                      ['FINISHED', 'FINAL', 'FT', 'FULL_TIME', 'AFTER_EXTRA_TIME', 'PENALTY_SHOOTOUT', 'AWARDED'].includes(statusUpper);
+                    const shouldShowRealResult = hasStartedByClock || hasStartedByStatus;
                     const matchLabel = `${match.homeTeam.name} vs ${match.awayTeam.name}`;
                     const showEventResultState = match.status === 'FINISHED';
                     const isEventBoardVisible = Boolean(eventBoardVisibleByMatch[match.id]);
@@ -4218,11 +4225,13 @@ function App() {
                                 />
                               </div>
                             </label>
-                            <p className="prediction-real-result">
-                              HT {realHtHome}-{realHtAway} | FT {realFtHome}-{realFtAway}
-                              <br />
-                              <span className="prediction-final-result">Final result: {realFtHome}-{realFtAway}</span>
-                            </p>
+                            {shouldShowRealResult ? (
+                              <p className="prediction-real-result">
+                                HT {realHtHome}-{realHtAway} | FT {realFtHome}-{realFtAway}
+                                <br />
+                                <span className="prediction-final-result">Final result: {realFtHome}-{realFtAway}</span>
+                              </p>
+                            ) : null}
                           </section>
 
                           <section className="prediction-team-side prediction-team-side-away">
