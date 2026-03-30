@@ -47,6 +47,7 @@ import {
   toLocalDateInputValue,
   type StatusFilter
 } from './lib/match-utils';
+import { REWARD_TIERS, getRewardProgress } from './lib/reward-system';
 
 type Competition = {
   id: number;
@@ -202,6 +203,7 @@ type ResponsiblePlayForm = {
 
 type AppPage = 'home' | 'game' | 'profile';
 type ThemeMode = 'light' | 'dark';
+type GameWorkspaceTab = 'play' | 'leaderboard' | 'settings';
 const SIGNUP_CODE_RESEND_SECONDS = 45;
 const GAME_TOUR_SEEN_KEY = 'predileague-game-tour-seen-v1';
 const GUIDE_DEMO_GROUP_ID = 'guide-demo-group-v1';
@@ -357,6 +359,7 @@ type GuideSnapshot = {
   groupPredictionsByMatch: Record<number, MatchPrediction[]>;
   predictionDrafts: Record<number, PredictionDraft>;
   groupLeaderboardData: GroupLeaderboard | null;
+  groupTotalLeaderboardData: GroupLeaderboard | null;
   groupBonusMatches: GroupBonusMatch[];
 };
 
@@ -431,14 +434,15 @@ function formatCountdown(ms: number) {
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
-function parsePlayersInput(value: string) {
+function parsePlayersInput(value: string, maxCount = 5) {
+  const normalizedMax = Number.isFinite(maxCount) ? Math.max(1, Math.floor(maxCount)) : 5;
   return Array.from(
     new Set(
       value
         .split(',')
         .map((item) => item.trim())
         .filter((item) => item.length > 0)
-        .slice(0, 5)
+        .slice(0, normalizedMax)
     )
   );
 }
@@ -446,9 +450,10 @@ function parsePlayersInput(value: string) {
 const HOME_PICK_PREFIX = 'HOME::';
 const AWAY_PICK_PREFIX = 'AWAY::';
 
-function encodeTeamPlayerPicks(homeCsv: string, awayCsv: string) {
-  const home = parsePlayersInput(homeCsv).map((name) => `${HOME_PICK_PREFIX}${name}`);
-  const away = parsePlayersInput(awayCsv).map((name) => `${AWAY_PICK_PREFIX}${name}`);
+function encodeTeamPlayerPicks(homeCsv: string, awayCsv: string, maxPicksPerTeam = 5) {
+  const normalizedMax = Number.isFinite(maxPicksPerTeam) ? Math.max(1, Math.floor(maxPicksPerTeam)) : 5;
+  const home = parsePlayersInput(homeCsv, normalizedMax).map((name) => `${HOME_PICK_PREFIX}${name}`);
+  const away = parsePlayersInput(awayCsv, normalizedMax).map((name) => `${AWAY_PICK_PREFIX}${name}`);
   return [...home, ...away];
 }
 
@@ -614,6 +619,38 @@ function getTeamAccentColor(team: Team) {
   return colorFromText(key || team.name || 'team');
 }
 
+function getTeamShortLabel(team: Team) {
+  const shortName = String(team.shortName ?? '').trim();
+  if (shortName) return shortName;
+
+  const fullName = String(team.name ?? '').trim();
+  if (!fullName) return 'Team';
+
+  // Keep readable names (e.g. "Manchester City" -> "Man City") instead of hard acronyms.
+  const normalized = fullName.replace(/\s+/g, ' ').trim();
+  const words = normalized.split(' ').filter(Boolean);
+
+  const compactWord = (word: string) => {
+    if (word.length <= 4) return word;
+    return `${word.slice(0, 3)}${word.slice(3).toLowerCase()}`;
+  };
+
+  if (words.length >= 2) {
+    const first = compactWord(words[0]);
+    const second = words[1];
+    const candidate = `${first} ${second}`;
+    if (candidate.length <= 16) return candidate;
+    return `${candidate.slice(0, 16).trimEnd()}…`;
+  }
+
+  if (normalized.length <= 16) return normalized;
+
+  const tla = String(team.tla ?? '').trim();
+  if (tla) return tla.toUpperCase();
+
+  return `${normalized.slice(0, 16).trimEnd()}…`;
+}
+
 function profileToForm(profile: UserProfile | null): ProfileForm {
   return {
     firstName: profile?.first_name ?? '',
@@ -709,6 +746,8 @@ function ImportantMatchCard({ match, onOpen }: { match: Match; onOpen?: (match: 
   const kickoffMs = Date.parse(match.utcDate);
   const isUpcoming = ['SCHEDULED', 'TIMED'].includes(match.status) && !Number.isNaN(kickoffMs) && kickoffMs > nowMs;
   const countdown = isUpcoming ? formatCountdown(kickoffMs - nowMs) : match.status;
+  const homeTeamLabel = getTeamShortLabel(match.homeTeam);
+  const awayTeamLabel = getTeamShortLabel(match.awayTeam);
 
   const body = (
     <>
@@ -722,12 +761,12 @@ function ImportantMatchCard({ match, onOpen }: { match: Match; onOpen?: (match: 
       <span className="important-feature-teams">
         <span className="team-name-wrap">
           {match.homeTeam.crest ? <img className="team-crest team-crest-large" src={match.homeTeam.crest} alt="" loading="lazy" /> : null}
-          <span className="team-name important-team-name">{match.homeTeam.name}</span>
+          <span className="team-name important-team-name" title={match.homeTeam.name}>{homeTeamLabel}</span>
         </span>
         <span className="important-vs">VS</span>
         <span className="team-name-wrap">
           {match.awayTeam.crest ? <img className="team-crest team-crest-large" src={match.awayTeam.crest} alt="" loading="lazy" /> : null}
-          <span className="team-name important-team-name">{match.awayTeam.name}</span>
+          <span className="team-name important-team-name" title={match.awayTeam.name}>{awayTeamLabel}</span>
         </span>
       </span>
     </>
@@ -771,6 +810,7 @@ function PlayerPicksInput({
   title,
   value,
   options,
+  maxPicks = 5,
   actualPlayers,
   showResultState = false,
   disabled,
@@ -781,6 +821,7 @@ function PlayerPicksInput({
   title: string;
   value: string;
   options: string[];
+  maxPicks?: number;
   actualPlayers?: string[];
   showResultState?: boolean;
   disabled: boolean;
@@ -788,11 +829,13 @@ function PlayerPicksInput({
   compact?: boolean;
 }) {
   const [selected, setSelected] = useState('');
-  const picks = useMemo(() => parsePlayersInput(value), [value]);
+  const normalizedMaxPicks = Number.isFinite(maxPicks) ? Math.max(1, Math.floor(maxPicks)) : 5;
+  const picks = useMemo(() => parsePlayersInput(value, normalizedMaxPicks), [value, normalizedMaxPicks]);
   const available = useMemo(
     () => options.filter((name) => !picks.some((pick) => pick.toLowerCase() === name.toLowerCase())),
     [options, picks]
   );
+  const canAddMore = picks.length < normalizedMaxPicks;
   const actualSet = useMemo(
     () => new Set((actualPlayers ?? []).map((name) => normalizePlayerToken(String(name ?? ''))).filter(Boolean)),
     [actualPlayers]
@@ -800,9 +843,10 @@ function PlayerPicksInput({
 
   const addSelected = () => {
     if (disabled) return;
+    if (!canAddMore) return;
     const candidate = selected.trim();
     if (!candidate) return;
-    const next = parsePlayersInput([...picks, candidate].join(', '));
+    const next = parsePlayersInput([...picks, candidate].join(', '), normalizedMaxPicks);
     onChange(next.join(', '));
     setSelected('');
   };
@@ -823,7 +867,7 @@ function PlayerPicksInput({
       <div className={`player-picks-box ${disabled ? 'player-picks-box-disabled' : ''}`}>
         {!disabled ? (
           <div className="player-picker-actions">
-            <select value={selected} onChange={(e) => setSelected(e.target.value)} aria-label={title}>
+            <select value={selected} onChange={(e) => setSelected(e.target.value)} aria-label={title} disabled={!canAddMore}>
               <option value="">{available.length > 0 ? 'Select player' : 'No players available'}</option>
               {available.map((name) => (
                 <option key={name} value={name}>
@@ -831,12 +875,17 @@ function PlayerPicksInput({
                 </option>
               ))}
             </select>
-            <button type="button" className="details-btn" disabled={!selected} onClick={addSelected}>
+            <button type="button" className="details-btn" disabled={!selected || !canAddMore} onClick={addSelected}>
               Add
             </button>
           </div>
         ) : null}
         <div className="player-picks-chips">
+          {!compact ? (
+            <span className="player-picks-limit">
+              Picks {picks.length}/{normalizedMaxPicks}
+            </span>
+          ) : null}
           {picks.length === 0 && !compact ? <span className="player-picks-empty">No players selected</span> : null}
           {picks.map((pick) => (
             <span
@@ -940,8 +989,10 @@ function App() {
   const [predictionDrafts, setPredictionDrafts] = useState<Record<number, PredictionDraft>>({});
   const [leaderboardScope, setLeaderboardScope] = useState<'total' | 'weekly'>('total');
   const [groupLeaderboardData, setGroupLeaderboardData] = useState<GroupLeaderboard | null>(null);
+  const [groupTotalLeaderboardData, setGroupTotalLeaderboardData] = useState<GroupLeaderboard | null>(null);
   const [groupLeaderboardLoading, setGroupLeaderboardLoading] = useState(false);
   const [groupViewDate, setGroupViewDate] = useState(today);
+  const [gameWorkspaceTab, setGameWorkspaceTab] = useState<GameWorkspaceTab>('play');
   const [groupBonusMatches, setGroupBonusMatches] = useState<GroupBonusMatch[]>([]);
   const [groupSettingsBusy, setGroupSettingsBusy] = useState(false);
   const [lockMinutesInput, setLockMinutesInput] = useState('0');
@@ -1068,6 +1119,13 @@ function App() {
   }, [competitions]);
 
   const groupLeaderboard = groupLeaderboardData?.leaderboard ?? [];
+  const myGroupTotalPoints = useMemo(() => {
+    if (!user) return 0;
+    const row = groupTotalLeaderboardData?.leaderboard?.find((item) => item.user_uid === user.uid);
+    return row?.points ?? 0;
+  }, [groupTotalLeaderboardData, user]);
+  const rewardProgress = useMemo(() => getRewardProgress(myGroupTotalPoints), [myGroupTotalPoints]);
+  const eventPickLimitPerTeam = rewardProgress.maxBonusPicksPerTeam;
   const gameTourStep = GAME_TOUR_STEPS[gameTourStepIndex] ?? GAME_TOUR_STEPS[0];
   const gameTourTarget = useMemo(() => {
     if (!gameTourActive) return null;
@@ -1494,6 +1552,7 @@ function App() {
       setGroupPredictionsByMatch({});
       setGroupMembers([]);
       setGroupLeaderboardData(null);
+      setGroupTotalLeaderboardData(null);
       setGroupBonusMatches([]);
       return;
     }
@@ -1511,6 +1570,8 @@ function App() {
   useEffect(() => {
     if (!selectedGroup) {
       setGroupLeaderboardData(null);
+      setGroupTotalLeaderboardData(null);
+      setGameWorkspaceTab('play');
       return;
     }
     if (selectedGroup.id === GUIDE_DEMO_GROUP_ID) {
@@ -1519,6 +1580,10 @@ function App() {
 
     void loadGroupLeaderboardData(selectedGroup.id, leaderboardScope, groupViewDate);
   }, [leaderboardScope, selectedGroup?.id, groupViewDate]);
+
+  useEffect(() => {
+    setGameWorkspaceTab('play');
+  }, [selectedGroupId]);
 
   useEffect(() => {
     if (page !== 'game' || !selectedGroup || !user || selectedGroup.id === GUIDE_DEMO_GROUP_ID || !isViewingToday) return;
@@ -1921,6 +1986,19 @@ function App() {
     }
   }
 
+  async function loadGroupTotalLeaderboardData(groupId: string, referenceDateValue: string = groupViewDate) {
+    try {
+      const data = await loadGroupLeaderboard({
+        groupId,
+        scope: 'total',
+        referenceDate: `${referenceDateValue}T00:00:00.000Z`
+      });
+      setGroupTotalLeaderboardData(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load total points progression.');
+    }
+  }
+
   async function loadGroupBonusData(groupId: string) {
     try {
       const data = await loadGroupBonusMatches(groupId);
@@ -2073,7 +2151,11 @@ function App() {
         };
       }
       setPredictionDrafts(nextDrafts);
-      await Promise.all([loadGroupLeaderboardData(group.id, leaderboardScope, targetDate), loadGroupBonusData(group.id)]);
+      await Promise.all([
+        loadGroupLeaderboardData(group.id, leaderboardScope, targetDate),
+        loadGroupTotalLeaderboardData(group.id, targetDate),
+        loadGroupBonusData(group.id)
+      ]);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load group data.');
     } finally {
@@ -2130,6 +2212,7 @@ function App() {
       setGroupPredictionsByMatch(byMatch);
       setGroupLeaderboardData(leaderboardData);
       setInvites(inviteRows);
+      void loadGroupTotalLeaderboardData(group.id, targetDate);
     } catch {
       // Ignore transient polling failures.
     }
@@ -2486,9 +2569,13 @@ function App() {
         htAway: numeric[1],
         ftHome: numeric[2],
         ftAway: numeric[3],
-        goalPlayers: encodeTeamPlayerPicks(draft.goalPlayersHome, draft.goalPlayersAway),
-        yellowCardPlayers: encodeTeamPlayerPicks(draft.yellowCardPlayersHome, draft.yellowCardPlayersAway),
-        redCardPlayers: encodeTeamPlayerPicks(draft.redCardPlayersHome, draft.redCardPlayersAway)
+        goalPlayers: encodeTeamPlayerPicks(draft.goalPlayersHome, draft.goalPlayersAway, eventPickLimitPerTeam),
+        yellowCardPlayers: encodeTeamPlayerPicks(
+          draft.yellowCardPlayersHome,
+          draft.yellowCardPlayersAway,
+          eventPickLimitPerTeam
+        ),
+        redCardPlayers: encodeTeamPlayerPicks(draft.redCardPlayersHome, draft.redCardPlayersAway, eventPickLimitPerTeam)
       }
     };
   }
@@ -2567,7 +2654,10 @@ function App() {
         byMatch[row.match_id].push(row);
       }
       setGroupPredictionsByMatch(byMatch);
-      await loadGroupLeaderboardData(selectedGroup.id, leaderboardScope, groupViewDate);
+      await Promise.all([
+        loadGroupLeaderboardData(selectedGroup.id, leaderboardScope, groupViewDate),
+        loadGroupTotalLeaderboardData(selectedGroup.id, groupViewDate)
+      ]);
       setMessage(
         lockedMatches > 0 || failCount > 0
           ? `Saved ${successCount} prediction(s). Skipped/failed: ${lockedMatches + failCount}.`
@@ -2616,6 +2706,7 @@ function App() {
     setInPageGuideStepIndex(actionDef.stepIndex);
 
     setGroupLeaderboardData(null);
+    setGroupTotalLeaderboardData(null);
     setGroupBonusMatches([]);
     setBusy(clampedAction === 2);
     setInviteSending(clampedAction === 6);
@@ -2736,6 +2827,40 @@ function App() {
           }
         : null
     );
+    setGroupTotalLeaderboardData(
+      leaderboardReady
+        ? {
+            scope: 'total',
+            weekStart: today,
+            weekEnd: today,
+            leaderboard: [
+              {
+                rank: 1,
+                user_uid: GUIDE_DEMO_USER_UID,
+                email: GUIDE_DEMO_INVITE_EMAIL,
+                points: 5,
+                winner_count: 1,
+                exact_ht_count: 1,
+                exact_ft_count: 1,
+                streak_days: 1,
+                earliest_submission: new Date().toISOString()
+              },
+              {
+                rank: 2,
+                user_uid: ownerUid,
+                email: ownerEmail,
+                points: 5,
+                winner_count: 1,
+                exact_ht_count: 1,
+                exact_ft_count: 1,
+                streak_days: 1,
+                earliest_submission: new Date().toISOString()
+              }
+            ],
+            rounds: [{ round: 1, total_points: 10 }]
+          }
+        : null
+    );
 
     setMessage(actionDef.feedbackMessage);
   }
@@ -2763,6 +2888,7 @@ function App() {
         groupPredictionsByMatch,
         predictionDrafts,
         groupLeaderboardData,
+        groupTotalLeaderboardData,
         groupBonusMatches
       };
     }
@@ -2812,6 +2938,7 @@ function App() {
       setGroupPredictionsByMatch(snapshot.groupPredictionsByMatch);
       setPredictionDrafts(snapshot.predictionDrafts);
       setGroupLeaderboardData(snapshot.groupLeaderboardData);
+      setGroupTotalLeaderboardData(snapshot.groupTotalLeaderboardData);
       setGroupBonusMatches(snapshot.groupBonusMatches);
     }
     inPageGuideSnapshotRef.current = null;
@@ -2886,6 +3013,7 @@ function App() {
       <header className="topbar">
         <div className="topbar-inner">
           <div className="topbar-brand">
+            {/* <img className="brand-mark" src="/brand-mark.svg" alt="PredictLeague" /> */}
             <img
               className="brand-logo"
               src={themeMode === 'dark' ? '/brand-logo-dark.svg' : '/brand-logo-light.svg'}
@@ -2916,7 +3044,7 @@ function App() {
           <div className="topbar-action">
             <button
               type="button"
-              className="chip"
+              className="chip topbar-guide-btn"
               onClick={startInPageGuide}
               title="Start complete how to play guide on this page"
             >
@@ -3128,14 +3256,14 @@ function App() {
                             <div className="team-line">
                               <span className="team-name-wrap">
                                 {match.homeTeam.crest ? <img className="team-crest" src={match.homeTeam.crest} alt="" loading="lazy" /> : null}
-                                <span className="team-name">{match.homeTeam.name}</span>
+                                <span className="team-name" title={match.homeTeam.name}>{getTeamShortLabel(match.homeTeam)}</span>
                               </span>
                               <strong className="team-score">{match.score?.fullTime?.home ?? '-'}</strong>
                             </div>
                             <div className="team-line">
                               <span className="team-name-wrap">
                                 {match.awayTeam.crest ? <img className="team-crest" src={match.awayTeam.crest} alt="" loading="lazy" /> : null}
-                                <span className="team-name">{match.awayTeam.name}</span>
+                                <span className="team-name" title={match.awayTeam.name}>{getTeamShortLabel(match.awayTeam)}</span>
                               </span>
                               <strong className="team-score">{match.score?.fullTime?.away ?? '-'}</strong>
                             </div>
@@ -3604,12 +3732,12 @@ function App() {
                           <span className="group-custom-match-teams">
                             <span className="team-name-wrap">
                               {match.homeTeam.crest ? <img className="team-crest" src={match.homeTeam.crest} alt="" loading="lazy" /> : null}
-                              <span className="team-name">{match.homeTeam.name}</span>
+                              <span className="team-name" title={match.homeTeam.name}>{getTeamShortLabel(match.homeTeam)}</span>
                             </span>
                             <span className="group-custom-match-vs">vs</span>
                             <span className="team-name-wrap">
                               {match.awayTeam.crest ? <img className="team-crest" src={match.awayTeam.crest} alt="" loading="lazy" /> : null}
-                              <span className="team-name">{match.awayTeam.name}</span>
+                              <span className="team-name" title={match.awayTeam.name}>{getTeamShortLabel(match.awayTeam)}</span>
                             </span>
                           </span>
                         </span>
@@ -3776,9 +3904,118 @@ function App() {
                 </section>
               ) : null}
 
+              <section className="filter-panel points-guide">
+                <h2>How Points Work</h2>
+                <div className="auth-actions">
+                  <button type="button" className="details-btn" onClick={startInPageGuide}>
+                    Start Full How To Play Guide
+                  </button>
+                </div>
+                <div className="points-list">
+                  <p>Winner correct: <strong>+1</strong></p>
+                  <p>Half-time exact score: <strong>+1</strong></p>
+                  <p>Full-time exact score: <strong>+1</strong></p>
+                  <p>Goal player pick hit (optional): <strong>+1</strong></p>
+                  <p>Yellow-card player pick hit (optional): <strong>+1</strong></p>
+                  <p>Red-card player pick hit (optional): <strong>+1</strong></p>
+                  <p>Perfect prediction (winner + HT + FT all correct): <strong>+2 bonus</strong></p>
+                  <p className="muted">
+                    Bonus player-pick capacity unlocks by tier (currently {rewardProgress.tier.title}: {eventPickLimitPerTeam} picks/team).
+                  </p>
+                </div>
+              </section>
+            </div>
+
+            <div className="game-main">
+              {!selectedGroup ? (
+                <article className="league-card empty">Select a group to start predicting matches.</article>
+              ) : null}
+
               {selectedGroup ? (
+                <section className="filter-panel game-tabs">
+                  <div className="quick-status">
+                    <button
+                      type="button"
+                      className={`chip ${gameWorkspaceTab === 'play' ? 'chip-active' : ''}`}
+                      onClick={() => setGameWorkspaceTab('play')}
+                    >
+                      Play
+                    </button>
+                    <button
+                      type="button"
+                      className={`chip ${gameWorkspaceTab === 'leaderboard' ? 'chip-active' : ''}`}
+                      onClick={() => setGameWorkspaceTab('leaderboard')}
+                    >
+                      Leaderboard
+                    </button>
+                    <button
+                      type="button"
+                      className={`chip ${gameWorkspaceTab === 'settings' ? 'chip-active' : ''}`}
+                      onClick={() => setGameWorkspaceTab('settings')}
+                    >
+                      Settings
+                    </button>
+                  </div>
+                </section>
+              ) : null}
+
+              {selectedGroup && gameWorkspaceTab === 'leaderboard' ? (
+                <section
+                  ref={leaderboardTourRef}
+                  data-tour-id="leaderboard"
+                  className={`filter-panel ${inPageGuideActive && guideActionIndex === 16 ? 'guide-focus-target' : ''}`}
+                >
+                  <h2>Leaderboard ({leaderboardScope === 'weekly' ? 'Weekly' : 'Total'})</h2>
+                  <div className="quick-status">
+                    <button
+                      type="button"
+                      className={`chip ${leaderboardScope === 'total' ? 'chip-active' : ''}`}
+                      onClick={() => setLeaderboardScope('total')}
+                    >
+                      Total
+                    </button>
+                    <button
+                      type="button"
+                      className={`chip ${leaderboardScope === 'weekly' ? 'chip-active' : ''}`}
+                      onClick={() => setLeaderboardScope('weekly')}
+                    >
+                      Weekly
+                    </button>
+                  </div>
+                  {groupLeaderboardLoading ? <p className="muted">Loading leaderboard...</p> : null}
+                  {groupLeaderboard.length === 0 ? <p className="muted">No members in this group.</p> : null}
+                  <div className="leaderboard-list">
+                    {groupLeaderboard.map((row) => (
+                      <article className="leaderboard-card" key={row.user_uid}>
+                        <div className="leaderboard-rank">#{row.rank}</div>
+                        <div className="leaderboard-user">
+                          <strong>{row.email}</strong>
+                          <p className="muted">
+                            FT:{row.exact_ft_count} | HT:{row.exact_ht_count} | W:{row.winner_count} | Streak:{row.streak_days}
+                          </p>
+                        </div>
+                        <div className="leaderboard-points">{row.points} pts</div>
+                      </article>
+                    ))}
+                  </div>
+                  {groupLeaderboardData?.rounds?.length ? (
+                    <div className="invite-list">
+                      <p>
+                        <strong>Round History</strong>
+                      </p>
+                      {groupLeaderboardData.rounds.map((round) => (
+                        <p key={round.round}>
+                          Round {round.round}: {round.total_points} pts
+                        </p>
+                      ))}
+                    </div>
+                  ) : null}
+                </section>
+              ) : null}
+
+              {selectedGroup && gameWorkspaceTab === 'settings' ? (
                 <section className="filter-panel">
-                  <h2>Fair Play Rules</h2>
+                  <h2>Group Settings</h2>
                   <p className="muted">
                     Lock minutes before kickoff: <strong>{selectedGroup.prediction_lock_minutes}</strong> | Bonus rules:{' '}
                     <strong>{selectedGroup.bonus_enabled ? 'On' : 'Off'}</strong> | Mode:{' '}
@@ -3873,12 +4110,12 @@ function App() {
                                   <span className="group-custom-match-teams">
                                     <span className="team-name-wrap">
                                       {match.homeTeam.crest ? <img className="team-crest" src={match.homeTeam.crest} alt="" loading="lazy" /> : null}
-                                      <span className="team-name">{match.homeTeam.name}</span>
+                                      <span className="team-name" title={match.homeTeam.name}>{getTeamShortLabel(match.homeTeam)}</span>
                                     </span>
                                     <span className="group-custom-match-vs">vs</span>
                                     <span className="team-name-wrap">
                                       {match.awayTeam.crest ? <img className="team-crest" src={match.awayTeam.crest} alt="" loading="lazy" /> : null}
-                                      <span className="team-name">{match.awayTeam.name}</span>
+                                      <span className="team-name" title={match.awayTeam.name}>{getTeamShortLabel(match.awayTeam)}</span>
                                     </span>
                                   </span>
                                 </span>
@@ -3931,7 +4168,7 @@ function App() {
                       </div>
                     </>
                   ) : (
-                    <p className="muted">Only group owner can update fair-play settings.</p>
+                    <p className="muted">Owner-only controls are available in this Settings tab for group owners.</p>
                   )}
 
                   <div className="invite-list">
@@ -3945,86 +4182,7 @@ function App() {
                 </section>
               ) : null}
 
-              {selectedGroup ? (
-                <section
-                  ref={leaderboardTourRef}
-                  data-tour-id="leaderboard"
-                  className={`filter-panel ${inPageGuideActive && guideActionIndex === 16 ? 'guide-focus-target' : ''}`}
-                >
-                  <h2>Leaderboard ({leaderboardScope === 'weekly' ? 'Weekly' : 'Total'})</h2>
-                  <div className="quick-status">
-                    <button
-                      type="button"
-                      className={`chip ${leaderboardScope === 'total' ? 'chip-active' : ''}`}
-                      onClick={() => setLeaderboardScope('total')}
-                    >
-                      Total
-                    </button>
-                    <button
-                      type="button"
-                      className={`chip ${leaderboardScope === 'weekly' ? 'chip-active' : ''}`}
-                      onClick={() => setLeaderboardScope('weekly')}
-                    >
-                      Weekly
-                    </button>
-                  </div>
-                  {groupLeaderboardLoading ? <p className="muted">Loading leaderboard...</p> : null}
-                  {groupLeaderboard.length === 0 ? <p className="muted">No members in this group.</p> : null}
-                  <div className="leaderboard-list">
-                    {groupLeaderboard.map((row) => (
-                      <article className="leaderboard-card" key={row.user_uid}>
-                        <div className="leaderboard-rank">#{row.rank}</div>
-                        <div className="leaderboard-user">
-                          <strong>{row.email}</strong>
-                          <p className="muted">
-                            FT:{row.exact_ft_count} | HT:{row.exact_ht_count} | W:{row.winner_count} | Streak:{row.streak_days}
-                          </p>
-                        </div>
-                        <div className="leaderboard-points">{row.points} pts</div>
-                      </article>
-                    ))}
-                  </div>
-                  {groupLeaderboardData?.rounds?.length ? (
-                    <div className="invite-list">
-                      <p>
-                        <strong>Round History</strong>
-                      </p>
-                      {groupLeaderboardData.rounds.map((round) => (
-                        <p key={round.round}>
-                          Round {round.round}: {round.total_points} pts
-                        </p>
-                      ))}
-                    </div>
-                  ) : null}
-                </section>
-              ) : null}
-
-              <section className="filter-panel points-guide">
-                <h2>How Points Work</h2>
-                <div className="auth-actions">
-                  <button type="button" className="details-btn" onClick={startInPageGuide}>
-                    Start Full How To Play Guide
-                  </button>
-                </div>
-                <div className="points-list">
-                  <p>Winner correct: <strong>+1</strong></p>
-                  <p>Half-time exact score: <strong>+1</strong></p>
-                  <p>Full-time exact score: <strong>+1</strong></p>
-                  <p>Goal player pick hit (optional): <strong>+1</strong></p>
-                  <p>Yellow-card player pick hit (optional): <strong>+1</strong></p>
-                  <p>Red-card player pick hit (optional): <strong>+1</strong></p>
-                  <p>Perfect prediction (winner + HT + FT all correct): <strong>+2 bonus</strong></p>
-                  <p className="muted">Max normal score per match: 8 pts (group bonus multipliers can increase it).</p>
-                </div>
-              </section>
-            </div>
-
-            <div className="game-main">
-              {!selectedGroup ? (
-                <article className="league-card empty">Select a group to start predicting matches.</article>
-              ) : null}
-
-              {selectedGroup ? (
+              {selectedGroup && gameWorkspaceTab === 'play' ? (
                 <section
                   ref={savePredictionsTourRef}
                   data-tour-id="save-predictions"
@@ -4062,7 +4220,36 @@ function App() {
                     <span className="group-chip">Completed Drafts: {completedDraftCount}</span>
                     <span className="group-chip">Saved: {Object.keys(myPredictions).length}</span>
                     <span className={`group-chip ${unsavedDraftCount > 0 ? 'group-chip-warn' : ''}`}>Unsaved: {unsavedDraftCount}</span>
+                    <span className="group-chip">Tier: {rewardProgress.tier.title}</span>
+                    <span className="group-chip">Bonus picks/team: {eventPickLimitPerTeam}</span>
                   </div>
+                  <article className="reward-track-card">
+                    <div className="reward-track-head">
+                      <strong>Reward Track</strong>
+                      <span>{rewardProgress.totalPoints} pts</span>
+                    </div>
+                    <p className="muted">
+                      Current tier: <strong>{rewardProgress.tier.title}</strong>. Bonus-pick capacity unlocks as you gain points.
+                    </p>
+                    <div className="reward-track-bar" aria-hidden="true">
+                      <span style={{ width: `${rewardProgress.progressPct}%` }} />
+                    </div>
+                    <p className="reward-track-meta">
+                      {rewardProgress.nextTier
+                        ? `${rewardProgress.pointsToNext} pts to ${rewardProgress.nextTier.title}`
+                        : 'Top tier reached'}
+                    </p>
+                    <div className="reward-track-tiers">
+                      {REWARD_TIERS.map((tier) => (
+                        <span
+                          key={tier.id}
+                          className={`reward-tier-chip ${rewardProgress.totalPoints >= tier.minPoints ? 'reward-tier-chip-unlocked' : ''}`}
+                        >
+                          {tier.title} ({tier.minPoints}+)
+                        </span>
+                      ))}
+                    </div>
+                  </article>
                   <button
                     type="button"
                     className={`refresh ${
@@ -4128,6 +4315,12 @@ function App() {
                       match.homeTeam.id !== undefined ? teamDetailsById[match.homeTeam.id]?.squad?.map((p) => p.name ?? '').filter(Boolean) ?? [] : [];
                     const awayPlayers =
                       match.awayTeam.id !== undefined ? teamDetailsById[match.awayTeam.id]?.squad?.map((p) => p.name ?? '').filter(Boolean) ?? [] : [];
+                    const homeTeamLabel = getTeamShortLabel(match.homeTeam);
+                    const awayTeamLabel = getTeamShortLabel(match.awayTeam);
+                    const predictedFtHome = draft.ftHome === '' ? '-' : draft.ftHome;
+                    const predictedFtAway = draft.ftAway === '' ? '-' : draft.ftAway;
+                    const predictedHtHome = draft.htHome === '' ? '-' : draft.htHome;
+                    const predictedHtAway = draft.htAway === '' ? '-' : draft.htAway;
 
                     return (
                       <article
@@ -4160,75 +4353,92 @@ function App() {
                         </div>
 
                         <div className="prediction-scoreboard">
-                          <section className="prediction-team-side">
-                            <span className="team-name-wrap">
-                              {match.homeTeam.crest ? <img className="team-crest" src={match.homeTeam.crest} alt="" loading="lazy" /> : null}
-                              <span className="team-name">{match.homeTeam.name}</span>
-                            </span>
-                          </section>
+                          <div className="prediction-scoreboard-top">
+                            <section className="prediction-team-side">
+                              <span className="team-name-wrap prediction-team-wrap-home">
+                                <span className="team-name" title={match.homeTeam.name}>{homeTeamLabel}</span>
+                                {match.homeTeam.crest ? <img className="team-crest" src={match.homeTeam.crest} alt="" loading="lazy" /> : null}
+                              </span>
+                            </section>
 
-                          <section className="prediction-score-core">
-                            <label className="prediction-score-row">
-                              <span className="prediction-score-tag">FT</span>
-                              <div className="inline-score">
-                                <input
-                                  type="number"
-                                  min={0}
-                                  value={draft.ftHome}
-                                  disabled={!isOpenForPrediction}
-                                  onChange={(e) =>
-                                    setPredictionDrafts((prev) => ({
-                                      ...prev,
-                                      [match.id]: { ...draft, ftHome: e.target.value }
-                                    }))
-                                  }
-                                />
-                                <span>-</span>
-                                <input
-                                  type="number"
-                                  min={0}
-                                  value={draft.ftAway}
-                                  disabled={!isOpenForPrediction}
-                                  onChange={(e) =>
-                                    setPredictionDrafts((prev) => ({
-                                      ...prev,
-                                      [match.id]: { ...draft, ftAway: e.target.value }
-                                    }))
-                                  }
-                                />
-                              </div>
-                            </label>
+                            <div className="prediction-scoreboard-clock">{kickoffTime(match.utcDate)}</div>
 
-                            <label className="prediction-score-row">
-                              <span className="prediction-score-tag">HT</span>
-                              <div className="inline-score">
-                                <input
-                                  type="number"
-                                  min={0}
-                                  value={draft.htHome}
-                                  disabled={!isOpenForPrediction}
-                                  onChange={(e) =>
-                                    setPredictionDrafts((prev) => ({
-                                      ...prev,
-                                      [match.id]: { ...draft, htHome: e.target.value }
-                                    }))
-                                  }
-                                />
-                                <span>-</span>
-                                <input
-                                  type="number"
-                                  min={0}
-                                  value={draft.htAway}
-                                  disabled={!isOpenForPrediction}
-                                  onChange={(e) =>
-                                    setPredictionDrafts((prev) => ({
-                                      ...prev,
-                                      [match.id]: { ...draft, htAway: e.target.value }
-                                    }))
-                                  }
-                                />
-                              </div>
-                            </label>
+                            <section className="prediction-team-side prediction-team-side-away">
+                              <span className="team-name-wrap prediction-team-wrap-away">
+                                {match.awayTeam.crest ? <img className="team-crest" src={match.awayTeam.crest} alt="" loading="lazy" /> : null}
+                                <span className="team-name" title={match.awayTeam.name}>{awayTeamLabel}</span>
+                              </span>
+                            </section>
+                          </div>
+
+                          <p className="prediction-scoreboard-summary">
+                            Prediction FT {predictedFtHome}-{predictedFtAway} · HT {predictedHtHome}-{predictedHtAway}
+                          </p>
+
+                          <section className="prediction-score-core prediction-score-core-compact">
+                            <div className="prediction-scoreboard-inputs">
+                              <label className="prediction-score-row">
+                                <span className="prediction-score-tag">FT</span>
+                                <div className="inline-score">
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    value={draft.ftHome}
+                                    disabled={!isOpenForPrediction}
+                                    onChange={(e) =>
+                                      setPredictionDrafts((prev) => ({
+                                        ...prev,
+                                        [match.id]: { ...draft, ftHome: e.target.value }
+                                      }))
+                                    }
+                                  />
+                                  <span>-</span>
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    value={draft.ftAway}
+                                    disabled={!isOpenForPrediction}
+                                    onChange={(e) =>
+                                      setPredictionDrafts((prev) => ({
+                                        ...prev,
+                                        [match.id]: { ...draft, ftAway: e.target.value }
+                                      }))
+                                    }
+                                  />
+                                </div>
+                              </label>
+
+                              <label className="prediction-score-row">
+                                <span className="prediction-score-tag">HT</span>
+                                <div className="inline-score">
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    value={draft.htHome}
+                                    disabled={!isOpenForPrediction}
+                                    onChange={(e) =>
+                                      setPredictionDrafts((prev) => ({
+                                        ...prev,
+                                        [match.id]: { ...draft, htHome: e.target.value }
+                                      }))
+                                    }
+                                  />
+                                  <span>-</span>
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    value={draft.htAway}
+                                    disabled={!isOpenForPrediction}
+                                    onChange={(e) =>
+                                      setPredictionDrafts((prev) => ({
+                                        ...prev,
+                                        [match.id]: { ...draft, htAway: e.target.value }
+                                      }))
+                                    }
+                                  />
+                                </div>
+                              </label>
+                            </div>
                             {shouldShowRealResult ? (
                               <div className="prediction-real-result quick-status prediction-real-result-quick">
                                 <span>HT {realHtHome}-{realHtAway}</span>
@@ -4237,19 +4447,14 @@ function App() {
                               </div>
                             ) : null}
                           </section>
-
-                          <section className="prediction-team-side prediction-team-side-away">
-                            <span className="team-name-wrap">
-                              {match.awayTeam.crest ? <img className="team-crest" src={match.awayTeam.crest} alt="" loading="lazy" /> : null}
-                              <span className="team-name">{match.awayTeam.name}</span>
-                            </span>
-                          </section>
                         </div>
 
                         <div className={`prediction-events-toggle ${isEventBoardVisible ? 'prediction-events-toggle-open' : ''}`}>
                           <div className="prediction-events-toggle-copy">
                             <strong>Want to earn more points?</strong>
-                            <span>Add goal and card picks to unlock bonus points.</span>
+                            <span>
+                              Add goal and card picks to unlock bonus points. Tier limit: {eventPickLimitPerTeam} picks per team.
+                            </span>
                           </div>
                           <button
                             type="button"
@@ -4267,36 +4472,40 @@ function App() {
 
                         {isEventBoardVisible ? (
                         <div className="prediction-events-board">
-                          <div className="prediction-events-head">
-                            <span />
-                            <span className="prediction-events-team-logo" title={match.homeTeam.name}>
-                              {match.homeTeam.crest ? (
-                                <img className="team-crest prediction-events-crest" src={match.homeTeam.crest} alt={match.homeTeam.name} loading="lazy" />
-                              ) : null}
-                            </span>
-                            <span className="prediction-events-team-logo" title={match.awayTeam.name}>
-                              {match.awayTeam.crest ? (
-                                <img className="team-crest prediction-events-crest" src={match.awayTeam.crest} alt={match.awayTeam.name} loading="lazy" />
-                              ) : null}
-                            </span>
-                          </div>
+                          <p className="prediction-events-hint">
+                            Bonus picks: up to {eventPickLimitPerTeam} players per team for each event.
+                          </p>
 
                           <div className="prediction-event-row">
-                            <span className="prediction-event-marker" title="Goal">
-                              ⚽
-                            </span>
+                            <div className="prediction-event-row-head">
+                              <span className="prediction-event-marker" title="Goal">
+                                ⚽
+                              </span>
+                              <span className="prediction-event-title">Goals</span>
+                            </div>
                             <div className="prediction-event-cell">
+                              <div className="prediction-event-team-head">
+                                <span className="prediction-event-team-badge" title={match.homeTeam.name} aria-label={match.homeTeam.name}>
+                                  {match.homeTeam.crest ? (
+                                    <img className="prediction-event-team-badge-crest" src={match.homeTeam.crest} alt={match.homeTeam.name} loading="lazy" />
+                                  ) : (
+                                    <span className="prediction-event-team-fallback">{homeTeamLabel}</span>
+                                  )}
+                                </span>
+                                <span className="prediction-event-team-name">{homeTeamLabel}</span>
+                              </div>
                               <PlayerPicksInput
                                 compact
                                 label="⚽"
-                              title={`${match.homeTeam.name} goal players`}
-                              value={draft.goalPlayersHome}
-                              options={homePlayers}
-                              actualPlayers={goalPlayersHomeActual}
-                              showResultState={showEventResultState}
-                              disabled={!isOpenForPrediction}
-                              onChange={(next) =>
-                                setPredictionDrafts((prev) => ({
+                                title={`${match.homeTeam.name} goal players`}
+                                value={draft.goalPlayersHome}
+                                options={homePlayers}
+                                maxPicks={eventPickLimitPerTeam}
+                                actualPlayers={goalPlayersHomeActual}
+                                showResultState={showEventResultState}
+                                disabled={!isOpenForPrediction}
+                                onChange={(next) =>
+                                  setPredictionDrafts((prev) => ({
                                     ...prev,
                                     [match.id]: { ...draft, goalPlayersHome: next }
                                   }))
@@ -4304,17 +4513,28 @@ function App() {
                               />
                             </div>
                             <div className="prediction-event-cell">
+                              <div className="prediction-event-team-head">
+                                <span className="prediction-event-team-badge" title={match.awayTeam.name} aria-label={match.awayTeam.name}>
+                                  {match.awayTeam.crest ? (
+                                    <img className="prediction-event-team-badge-crest" src={match.awayTeam.crest} alt={match.awayTeam.name} loading="lazy" />
+                                  ) : (
+                                    <span className="prediction-event-team-fallback">{awayTeamLabel}</span>
+                                  )}
+                                </span>
+                                <span className="prediction-event-team-name">{awayTeamLabel}</span>
+                              </div>
                               <PlayerPicksInput
                                 compact
                                 label="⚽"
-                              title={`${match.awayTeam.name} goal players`}
-                              value={draft.goalPlayersAway}
-                              options={awayPlayers}
-                              actualPlayers={goalPlayersAwayActual}
-                              showResultState={showEventResultState}
-                              disabled={!isOpenForPrediction}
-                              onChange={(next) =>
-                                setPredictionDrafts((prev) => ({
+                                title={`${match.awayTeam.name} goal players`}
+                                value={draft.goalPlayersAway}
+                                options={awayPlayers}
+                                maxPicks={eventPickLimitPerTeam}
+                                actualPlayers={goalPlayersAwayActual}
+                                showResultState={showEventResultState}
+                                disabled={!isOpenForPrediction}
+                                onChange={(next) =>
+                                  setPredictionDrafts((prev) => ({
                                     ...prev,
                                     [match.id]: { ...draft, goalPlayersAway: next }
                                   }))
@@ -4324,21 +4544,35 @@ function App() {
                           </div>
 
                           <div className="prediction-event-row">
-                            <span className="prediction-event-marker" title="Yellow Card">
-                              <img className="prediction-event-icon" src="/yellow-card.png" alt="Yellow card" loading="lazy" />
-                            </span>
+                            <div className="prediction-event-row-head">
+                              <span className="prediction-event-marker" title="Yellow Card">
+                                <img className="prediction-event-icon" src="/yellow-card.png" alt="Yellow card" loading="lazy" />
+                              </span>
+                              <span className="prediction-event-title">Yellow Cards</span>
+                            </div>
                             <div className="prediction-event-cell">
+                              <div className="prediction-event-team-head">
+                                <span className="prediction-event-team-badge" title={match.homeTeam.name} aria-label={match.homeTeam.name}>
+                                  {match.homeTeam.crest ? (
+                                    <img className="prediction-event-team-badge-crest" src={match.homeTeam.crest} alt={match.homeTeam.name} loading="lazy" />
+                                  ) : (
+                                    <span className="prediction-event-team-fallback">{homeTeamLabel}</span>
+                                  )}
+                                </span>
+                                <span className="prediction-event-team-name">{homeTeamLabel}</span>
+                              </div>
                               <PlayerPicksInput
                                 compact
                                 label="🟨"
-                              title={`${match.homeTeam.name} yellow card players`}
-                              value={draft.yellowCardPlayersHome}
-                              options={homePlayers}
-                              actualPlayers={yellowPlayersHomeActual}
-                              showResultState={showEventResultState}
-                              disabled={!isOpenForPrediction}
-                              onChange={(next) =>
-                                setPredictionDrafts((prev) => ({
+                                title={`${match.homeTeam.name} yellow card players`}
+                                value={draft.yellowCardPlayersHome}
+                                options={homePlayers}
+                                maxPicks={eventPickLimitPerTeam}
+                                actualPlayers={yellowPlayersHomeActual}
+                                showResultState={showEventResultState}
+                                disabled={!isOpenForPrediction}
+                                onChange={(next) =>
+                                  setPredictionDrafts((prev) => ({
                                     ...prev,
                                     [match.id]: { ...draft, yellowCardPlayersHome: next }
                                   }))
@@ -4346,17 +4580,28 @@ function App() {
                               />
                             </div>
                             <div className="prediction-event-cell">
+                              <div className="prediction-event-team-head">
+                                <span className="prediction-event-team-badge" title={match.awayTeam.name} aria-label={match.awayTeam.name}>
+                                  {match.awayTeam.crest ? (
+                                    <img className="prediction-event-team-badge-crest" src={match.awayTeam.crest} alt={match.awayTeam.name} loading="lazy" />
+                                  ) : (
+                                    <span className="prediction-event-team-fallback">{awayTeamLabel}</span>
+                                  )}
+                                </span>
+                                <span className="prediction-event-team-name">{awayTeamLabel}</span>
+                              </div>
                               <PlayerPicksInput
                                 compact
                                 label="🟨"
-                              title={`${match.awayTeam.name} yellow card players`}
-                              value={draft.yellowCardPlayersAway}
-                              options={awayPlayers}
-                              actualPlayers={yellowPlayersAwayActual}
-                              showResultState={showEventResultState}
-                              disabled={!isOpenForPrediction}
-                              onChange={(next) =>
-                                setPredictionDrafts((prev) => ({
+                                title={`${match.awayTeam.name} yellow card players`}
+                                value={draft.yellowCardPlayersAway}
+                                options={awayPlayers}
+                                maxPicks={eventPickLimitPerTeam}
+                                actualPlayers={yellowPlayersAwayActual}
+                                showResultState={showEventResultState}
+                                disabled={!isOpenForPrediction}
+                                onChange={(next) =>
+                                  setPredictionDrafts((prev) => ({
                                     ...prev,
                                     [match.id]: { ...draft, yellowCardPlayersAway: next }
                                   }))
@@ -4366,21 +4611,35 @@ function App() {
                           </div>
 
                           <div className="prediction-event-row">
-                            <span className="prediction-event-marker" title="Red Card">
-                              <img className="prediction-event-icon" src="/red-card.png" alt="Red card" loading="lazy" />
-                            </span>
+                            <div className="prediction-event-row-head">
+                              <span className="prediction-event-marker" title="Red Card">
+                                <img className="prediction-event-icon" src="/red-card.png" alt="Red card" loading="lazy" />
+                              </span>
+                              <span className="prediction-event-title">Red Cards</span>
+                            </div>
                             <div className="prediction-event-cell">
+                              <div className="prediction-event-team-head">
+                                <span className="prediction-event-team-badge" title={match.homeTeam.name} aria-label={match.homeTeam.name}>
+                                  {match.homeTeam.crest ? (
+                                    <img className="prediction-event-team-badge-crest" src={match.homeTeam.crest} alt={match.homeTeam.name} loading="lazy" />
+                                  ) : (
+                                    <span className="prediction-event-team-fallback">{homeTeamLabel}</span>
+                                  )}
+                                </span>
+                                <span className="prediction-event-team-name">{homeTeamLabel}</span>
+                              </div>
                               <PlayerPicksInput
                                 compact
                                 label="🟥"
-                              title={`${match.homeTeam.name} red card players`}
-                              value={draft.redCardPlayersHome}
-                              options={homePlayers}
-                              actualPlayers={redPlayersHomeActual}
-                              showResultState={showEventResultState}
-                              disabled={!isOpenForPrediction}
-                              onChange={(next) =>
-                                setPredictionDrafts((prev) => ({
+                                title={`${match.homeTeam.name} red card players`}
+                                value={draft.redCardPlayersHome}
+                                options={homePlayers}
+                                maxPicks={eventPickLimitPerTeam}
+                                actualPlayers={redPlayersHomeActual}
+                                showResultState={showEventResultState}
+                                disabled={!isOpenForPrediction}
+                                onChange={(next) =>
+                                  setPredictionDrafts((prev) => ({
                                     ...prev,
                                     [match.id]: { ...draft, redCardPlayersHome: next }
                                   }))
@@ -4388,17 +4647,28 @@ function App() {
                               />
                             </div>
                             <div className="prediction-event-cell">
+                              <div className="prediction-event-team-head">
+                                <span className="prediction-event-team-badge" title={match.awayTeam.name} aria-label={match.awayTeam.name}>
+                                  {match.awayTeam.crest ? (
+                                    <img className="prediction-event-team-badge-crest" src={match.awayTeam.crest} alt={match.awayTeam.name} loading="lazy" />
+                                  ) : (
+                                    <span className="prediction-event-team-fallback">{awayTeamLabel}</span>
+                                  )}
+                                </span>
+                                <span className="prediction-event-team-name">{awayTeamLabel}</span>
+                              </div>
                               <PlayerPicksInput
                                 compact
                                 label="🟥"
-                              title={`${match.awayTeam.name} red card players`}
-                              value={draft.redCardPlayersAway}
-                              options={awayPlayers}
-                              actualPlayers={redPlayersAwayActual}
-                              showResultState={showEventResultState}
-                              disabled={!isOpenForPrediction}
-                              onChange={(next) =>
-                                setPredictionDrafts((prev) => ({
+                                title={`${match.awayTeam.name} red card players`}
+                                value={draft.redCardPlayersAway}
+                                options={awayPlayers}
+                                maxPicks={eventPickLimitPerTeam}
+                                actualPlayers={redPlayersAwayActual}
+                                showResultState={showEventResultState}
+                                disabled={!isOpenForPrediction}
+                                onChange={(next) =>
+                                  setPredictionDrafts((prev) => ({
                                     ...prev,
                                     [match.id]: { ...draft, redCardPlayersAway: next }
                                   }))

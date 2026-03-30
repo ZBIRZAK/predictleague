@@ -1134,21 +1134,73 @@ function normalizeNameForCompare(value: string) {
     .trim();
 }
 
-function sanitizePredictedPlayers(input: unknown, maxCount = 5) {
+const REWARD_TIERS = [
+  { id: 'rookie', minPoints: 0, maxBonusPicksPerTeam: 1 },
+  { id: 'tactician', minPoints: 20, maxBonusPicksPerTeam: 2 },
+  { id: 'strategist', minPoints: 55, maxBonusPicksPerTeam: 3 },
+  { id: 'elite', minPoints: 100, maxBonusPicksPerTeam: 4 },
+  { id: 'legend', minPoints: 170, maxBonusPicksPerTeam: 5 }
+] as const;
+
+function getBonusPickLimitForPoints(totalPoints: number) {
+  const safePoints = Number.isFinite(totalPoints) ? Math.max(0, Math.floor(totalPoints)) : 0;
+  for (let i = REWARD_TIERS.length - 1; i >= 0; i -= 1) {
+    if (safePoints >= REWARD_TIERS[i].minPoints) {
+      return REWARD_TIERS[i].maxBonusPicksPerTeam;
+    }
+  }
+  return REWARD_TIERS[0].maxBonusPicksPerTeam;
+}
+
+function sanitizePredictedPlayers(input: unknown, maxCountPerTeam = 5) {
   if (!Array.isArray(input)) return [];
+  const normalizedMax = Number.isFinite(maxCountPerTeam) ? Math.max(1, Math.floor(maxCountPerTeam)) : 5;
+  const outHome: string[] = [];
+  const outAway: string[] = [];
+  const seenHome = new Set<string>();
+  const seenAway = new Set<string>();
+
+  const parseRaw = (value: string) => {
+    if (value.startsWith('HOME::')) return { side: 'home' as const, name: value.slice('HOME::'.length) };
+    if (value.startsWith('AWAY::')) return { side: 'away' as const, name: value.slice('AWAY::'.length) };
+    return { side: 'home' as const, name: value };
+  };
+
   const out: string[] = [];
-  const seen = new Set<string>();
   for (const raw of input) {
     if (typeof raw !== 'string') continue;
-    const value = raw.trim().slice(0, 80);
+    const parsed = parseRaw(raw.trim());
+    const value = parsed.name.trim().slice(0, 80);
     if (!value) continue;
     const normalized = normalizeNameForCompare(value);
-    if (!normalized || seen.has(normalized)) continue;
-    seen.add(normalized);
-    out.push(value);
-    if (out.length >= maxCount) break;
+    if (!normalized) continue;
+
+    if (parsed.side === 'away') {
+      if (seenAway.has(normalized) || outAway.length >= normalizedMax) continue;
+      seenAway.add(normalized);
+      outAway.push(`AWAY::${value}`);
+      continue;
+    }
+
+    if (seenHome.has(normalized) || outHome.length >= normalizedMax) continue;
+    seenHome.add(normalized);
+    outHome.push(`HOME::${value}`);
   }
+  out.push(...outHome, ...outAway);
   return out;
+}
+
+async function loadUserGroupTotalPoints(groupId: string, userUid: string) {
+  if (!supabaseAdmin) return 0;
+  const { data, error } = await supabaseAdmin
+    .from('prediction_points_snapshots')
+    .select('total_points')
+    .eq('group_id', groupId)
+    .eq('user_uid', userUid);
+  if (error) {
+    throw new Error(error.message);
+  }
+  return (data ?? []).reduce((sum, row) => sum + Number(row.total_points ?? 0), 0);
 }
 
 function hasAnyPlayerMatch(
@@ -2516,10 +2568,6 @@ app.post('/internal/db/predictions', requireFirebaseAuth, async (req: AuthedRequ
     return;
   }
 
-  const normalizedGoalPlayers = sanitizePredictedPlayers(goalPlayers);
-  const normalizedYellowCardPlayers = sanitizePredictedPlayers(yellowCardPlayers);
-  const normalizedRedCardPlayers = sanitizePredictedPlayers(redCardPlayers);
-
   try {
     const membership = await requireGroupMember(req, res, groupId);
     if (!membership) return;
@@ -2585,6 +2633,12 @@ app.post('/internal/db/predictions', requireFirebaseAuth, async (req: AuthedRequ
       res.status(423).json({ error: 'Predictions are locked for this match.' });
       return;
     }
+
+    const totalPoints = await loadUserGroupTotalPoints(groupId, userUid);
+    const maxBonusPicksPerTeam = getBonusPickLimitForPoints(totalPoints);
+    const normalizedGoalPlayers = sanitizePredictedPlayers(goalPlayers, maxBonusPicksPerTeam);
+    const normalizedYellowCardPlayers = sanitizePredictedPlayers(yellowCardPlayers, maxBonusPicksPerTeam);
+    const normalizedRedCardPlayers = sanitizePredictedPlayers(redCardPlayers, maxBonusPicksPerTeam);
 
     const { error } = await admin.from('predictions').upsert(
       {
