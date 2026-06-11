@@ -5244,7 +5244,13 @@ function App() {
       </main>
       <footer className="app-footer">
         <div className="app-footer-inner">
-          <p>Copyright © {new Date().getFullYear()} PredictLeague. All rights reserved.</p>
+          <p>
+            Copyright © {new Date().getFullYear()}{' '}
+            <a href="https://box-com.com" target="_blank" rel="noreferrer">
+              Box-com.com
+            </a>
+            . All rights reserved.
+          </p>
         </div>
       </footer>
     </div>
