@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import nodemailer from 'nodemailer';
 import { createClient } from '@supabase/supabase-js';
+import { getBonusPickLimitForPoints } from './reward-system.js';
 
 const app = express();
 const port = Number(process.env.PORT ?? 8787);
@@ -1132,24 +1133,6 @@ function normalizeNameForCompare(value: string) {
     .replace(/[^a-z0-9\s'-]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-}
-
-const REWARD_TIERS = [
-  { id: 'rookie', minPoints: 0, maxBonusPicksPerTeam: 1 },
-  { id: 'tactician', minPoints: 20, maxBonusPicksPerTeam: 2 },
-  { id: 'strategist', minPoints: 55, maxBonusPicksPerTeam: 3 },
-  { id: 'elite', minPoints: 100, maxBonusPicksPerTeam: 4 },
-  { id: 'legend', minPoints: 170, maxBonusPicksPerTeam: 5 }
-] as const;
-
-function getBonusPickLimitForPoints(totalPoints: number) {
-  const safePoints = Number.isFinite(totalPoints) ? Math.max(0, Math.floor(totalPoints)) : 0;
-  for (let i = REWARD_TIERS.length - 1; i >= 0; i -= 1) {
-    if (safePoints >= REWARD_TIERS[i].minPoints) {
-      return REWARD_TIERS[i].maxBonusPicksPerTeam;
-    }
-  }
-  return REWARD_TIERS[0].maxBonusPicksPerTeam;
 }
 
 function sanitizePredictedPlayers(input: unknown, maxCountPerTeam = 5) {
