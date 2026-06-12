@@ -4078,18 +4078,6 @@ function App() {
                       </article>
                     ))}
                   </div>
-                  {groupLeaderboardData?.rounds?.length ? (
-                    <div className="invite-list">
-                      <p>
-                        <strong>Round History</strong>
-                      </p>
-                      {groupLeaderboardData.rounds.map((round) => (
-                        <p key={round.round}>
-                          Round {round.round}: {round.total_points} pts
-                        </p>
-                      ))}
-                    </div>
-                  ) : null}
                 </section>
               ) : null}
 
