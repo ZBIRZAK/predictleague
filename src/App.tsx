@@ -2005,6 +2005,9 @@ function App() {
         referenceDate: `${referenceDateValue}T00:00:00.000Z`
       });
       setGroupLeaderboardData(data);
+      if (scope === 'total') {
+        setGroupTotalLeaderboardData(data);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load leaderboard.');
     } finally {
@@ -2180,7 +2183,7 @@ function App() {
       setPredictionDrafts(nextDrafts);
       await Promise.all([
         loadGroupLeaderboardData(group.id, leaderboardScope, targetDate),
-        loadGroupTotalLeaderboardData(group.id, targetDate),
+        ...(leaderboardScope === 'total' ? [] : [loadGroupTotalLeaderboardData(group.id, targetDate)]),
         loadGroupBonusData(group.id)
       ]);
     } catch (err) {
@@ -2644,6 +2647,7 @@ function App() {
 
       const draft = predictionDrafts[match.id];
       if (!draft) continue;
+      if (!isPredictionDraftDirty(draft, myPredictions[match.id])) continue;
       const built = buildPredictionPayload(match, draft);
       if ('error' in built) {
         if (built.error.includes('numbers')) {
@@ -2657,11 +2661,16 @@ function App() {
     }
 
     if (payloads.length === 0) {
-      setError(
-        lockedMatches > 0
-          ? `No predictions saved. ${lockedMatches} match(es) are locked (kickoff already started).`
-          : 'No completed predictions to save. Fill HT and FT first.'
-      );
+      if (unsavedDraftCount === 0 && completedDraftCount > 0) {
+        setMessage('All predictions are already saved.');
+        setError('');
+      } else {
+        setError(
+          lockedMatches > 0
+            ? `No predictions saved. ${lockedMatches} match(es) are locked (kickoff already started).`
+            : 'No completed predictions to save. Fill HT and FT first.'
+        );
+      }
       return;
     }
 
@@ -2694,15 +2703,17 @@ function App() {
         byMatch[row.match_id].push(row);
       }
       setGroupPredictionsByMatch(byMatch);
-      await Promise.all([
-        loadGroupLeaderboardData(selectedGroup.id, leaderboardScope, groupViewDate),
-        loadGroupTotalLeaderboardData(selectedGroup.id, groupViewDate)
-      ]);
       setMessage(
         lockedMatches > 0 || failCount > 0
           ? `Saved ${successCount} prediction(s). Skipped/failed: ${lockedMatches + failCount}.`
           : `Saved ${successCount} prediction(s).`
       );
+      void Promise.all([
+        loadGroupLeaderboardData(selectedGroup.id, leaderboardScope, groupViewDate),
+        ...(leaderboardScope === 'total'
+          ? []
+          : [loadGroupTotalLeaderboardData(selectedGroup.id, groupViewDate)])
+      ]);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save all predictions.');
     } finally {
