@@ -4790,7 +4790,6 @@ function App() {
                                   <p className="reveal-match">{matchLabel}</p>
                                   {points.ready ? (
                                     <div className="reveal-points-breakdown">
-                                      <strong>Why {points.total} pts:</strong>
                                       {pointBreakdown.map((entry) => (
                                         <span key={entry.label}>
                                           {entry.label} +{entry.value}
