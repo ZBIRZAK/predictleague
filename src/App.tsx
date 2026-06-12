@@ -457,7 +457,7 @@ function encodeTeamPlayerPicks(homeCsv: string, awayCsv: string, maxPicksPerTeam
   return [...home, ...away];
 }
 
-function splitTeamPlayerPicks(picks: string[] | undefined) {
+function splitTeamPlayerPickLists(picks: string[] | undefined) {
   const home: string[] = [];
   const away: string[] = [];
   for (const raw of picks ?? []) {
@@ -473,9 +473,14 @@ function splitTeamPlayerPicks(picks: string[] | undefined) {
     }
     home.push(value);
   }
+  return { home, away };
+}
+
+function splitTeamPlayerPicks(picks: string[] | undefined) {
+  const split = splitTeamPlayerPickLists(picks);
   return {
-    home: home.join(', '),
-    away: away.join(', ')
+    home: split.home.join(', '),
+    away: split.away.join(', ')
   };
 }
 
@@ -508,6 +513,24 @@ function incidentPlayersForTeam(incidents: MatchIncident[] | undefined, team: Te
     .filter((item) => matchesTeam(String(item.team ?? '')))
     .map((item) => String(item.player ?? '').trim())
     .filter(Boolean);
+}
+
+function isPlayerPickHit(
+  match: Match,
+  playerName: string,
+  side: 'home' | 'away',
+  incidents: MatchIncident[] | undefined
+) {
+  const normalizedPlayer = normalizePlayerToken(playerName);
+  if (!normalizedPlayer || !incidents?.length) return false;
+  const team = side === 'home' ? match.homeTeam : match.awayTeam;
+  const normalizedTeam = normalizePlayerToken(String(team.name ?? ''));
+
+  return incidents.some((incident) => {
+    if (normalizePlayerToken(String(incident.player ?? '')) !== normalizedPlayer) return false;
+    const incidentTeam = normalizePlayerToken(String(incident.team ?? ''));
+    return !normalizedTeam || !incidentTeam || incidentTeam === normalizedTeam;
+  });
 }
 
 function normalizePlayerPicksCsv(value: string) {
@@ -4317,11 +4340,6 @@ function App() {
                       match.awayTeam.id !== undefined ? teamDetailsById[match.awayTeam.id]?.squad?.map((p) => p.name ?? '').filter(Boolean) ?? [] : [];
                     const homeTeamLabel = getTeamShortLabel(match.homeTeam);
                     const awayTeamLabel = getTeamShortLabel(match.awayTeam);
-                    const predictedFtHome = draft.ftHome === '' ? '-' : draft.ftHome;
-                    const predictedFtAway = draft.ftAway === '' ? '-' : draft.ftAway;
-                    const predictedHtHome = draft.htHome === '' ? '-' : draft.htHome;
-                    const predictedHtAway = draft.htAway === '' ? '-' : draft.htAway;
-
                     return (
                       <article
                         className={`league-card prediction-card ${
@@ -4371,45 +4389,10 @@ function App() {
                             </section>
                           </div>
 
-                          <p className="prediction-scoreboard-summary">
-                            Prediction FT {predictedFtHome}-{predictedFtAway} · HT {predictedHtHome}-{predictedHtAway}
-                          </p>
-
                           <section className="prediction-score-core prediction-score-core-compact">
                             <div className="prediction-scoreboard-inputs">
                               <label className="prediction-score-row">
-                                <span className="prediction-score-tag">FT</span>
-                                <div className="inline-score">
-                                  <input
-                                    type="number"
-                                    min={0}
-                                    value={draft.ftHome}
-                                    disabled={!isOpenForPrediction}
-                                    onChange={(e) =>
-                                      setPredictionDrafts((prev) => ({
-                                        ...prev,
-                                        [match.id]: { ...draft, ftHome: e.target.value }
-                                      }))
-                                    }
-                                  />
-                                  <span>-</span>
-                                  <input
-                                    type="number"
-                                    min={0}
-                                    value={draft.ftAway}
-                                    disabled={!isOpenForPrediction}
-                                    onChange={(e) =>
-                                      setPredictionDrafts((prev) => ({
-                                        ...prev,
-                                        [match.id]: { ...draft, ftAway: e.target.value }
-                                      }))
-                                    }
-                                  />
-                                </div>
-                              </label>
-
-                              <label className="prediction-score-row">
-                                <span className="prediction-score-tag">HT</span>
+                                <span className="prediction-score-tag">Score for 45 min</span>
                                 <div className="inline-score">
                                   <input
                                     type="number"
@@ -4438,11 +4421,42 @@ function App() {
                                   />
                                 </div>
                               </label>
+
+                              <label className="prediction-score-row">
+                                <span className="prediction-score-tag">Final score</span>
+                                <div className="inline-score">
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    value={draft.ftHome}
+                                    disabled={!isOpenForPrediction}
+                                    onChange={(e) =>
+                                      setPredictionDrafts((prev) => ({
+                                        ...prev,
+                                        [match.id]: { ...draft, ftHome: e.target.value }
+                                      }))
+                                    }
+                                  />
+                                  <span>-</span>
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    value={draft.ftAway}
+                                    disabled={!isOpenForPrediction}
+                                    onChange={(e) =>
+                                      setPredictionDrafts((prev) => ({
+                                        ...prev,
+                                        [match.id]: { ...draft, ftAway: e.target.value }
+                                      }))
+                                    }
+                                  />
+                                </div>
+                              </label>
                             </div>
                             {shouldShowRealResult ? (
                               <div className="prediction-real-result quick-status prediction-real-result-quick">
-                                <span>HT {realHtHome}-{realHtAway}</span>
-                                <span>FT {realFtHome}-{realFtAway}</span>
+                                <span>Score for 45 min {realHtHome}-{realHtAway}</span>
+                                <span>Final score {realFtHome}-{realFtAway}</span>
                                 <span className="prediction-final-result">Final {realFtHome}-{realFtAway}</span>
                               </div>
                             ) : null}
@@ -4704,9 +4718,59 @@ function App() {
                           >
                             {matchPredictions.map((item) => {
                               const points = calculatePredictionPoints(match, item);
-                              const itemGoalSplit = splitTeamPlayerPicks(item.goal_players);
-                              const itemYellowSplit = splitTeamPlayerPicks(item.yellow_card_players);
-                              const itemRedSplit = splitTeamPlayerPicks(item.red_card_players);
+                              const itemGoalSplit = splitTeamPlayerPickLists(item.goal_players);
+                              const itemYellowSplit = splitTeamPlayerPickLists(item.yellow_card_players);
+                              const itemRedSplit = splitTeamPlayerPickLists(item.red_card_players);
+                              const pointBreakdown = [
+                                { label: 'Correct winner', value: points.winner },
+                                { label: '45 min exact score', value: points.ht },
+                                { label: 'Final exact score', value: points.ft },
+                                { label: 'Goal player hit', value: points.goalEvent },
+                                { label: 'Yellow-card player hit', value: points.yellowEvent },
+                                { label: 'Red-card player hit', value: points.redEvent },
+                                { label: 'Perfect prediction bonus', value: points.perfectBonus }
+                              ].filter((entry) => entry.value > 0);
+                              const renderPlayerPicks = (
+                                split: { home: string[]; away: string[] },
+                                incidents: MatchIncident[] | undefined
+                              ) => (
+                                <span className="reveal-player-teams">
+                                  <span>
+                                    {match.homeTeam.tla ?? 'Home'}{' '}
+                                    {split.home.length > 0
+                                      ? split.home.map((player) => (
+                                          <span
+                                            className={`reveal-player-pick ${
+                                              isPlayerPickHit(match, player, 'home', incidents)
+                                                ? 'reveal-player-pick-hit'
+                                                : 'reveal-player-pick-miss'
+                                            }`}
+                                            key={`home-${player}`}
+                                          >
+                                            {player}
+                                          </span>
+                                        ))
+                                      : '-'}
+                                  </span>
+                                  <span>
+                                    {match.awayTeam.tla ?? 'Away'}{' '}
+                                    {split.away.length > 0
+                                      ? split.away.map((player) => (
+                                          <span
+                                            className={`reveal-player-pick ${
+                                              isPlayerPickHit(match, player, 'away', incidents)
+                                                ? 'reveal-player-pick-hit'
+                                                : 'reveal-player-pick-miss'
+                                            }`}
+                                            key={`away-${player}`}
+                                          >
+                                            {player}
+                                          </span>
+                                        ))
+                                      : '-'}
+                                  </span>
+                                </span>
+                              );
                               return (
                                 <article
                                   className={`reveal-card ${
@@ -4724,26 +4788,39 @@ function App() {
                                     {points.ready ? <span className="reveal-points">{points.total} pts</span> : null}
                                   </div>
                                   <p className="reveal-match">{matchLabel}</p>
+                                  {points.ready ? (
+                                    <div className="reveal-points-breakdown">
+                                      <strong>Why {points.total} pts:</strong>
+                                      {pointBreakdown.map((entry) => (
+                                        <span key={entry.label}>
+                                          {entry.label} +{entry.value}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  ) : null}
                                   <div className="reveal-scores">
                                     <p>
-                                      <strong>HT:</strong> {item.ht_home} - {item.ht_away}
+                                      <strong>Score for 45 min:</strong> {item.ht_home} - {item.ht_away}
                                     </p>
                                     <p>
-                                      <strong>FT:</strong> {item.ft_home} - {item.ft_away}
+                                      <strong>Final score:</strong> {item.ft_home} - {item.ft_away}
                                     </p>
                                     {item.goal_players?.length ? (
                                       <p>
-                                        <strong>Goal:</strong> {match.homeTeam.tla ?? 'Home'} [{itemGoalSplit.home || '-'}] | {match.awayTeam.tla ?? 'Away'} [{itemGoalSplit.away || '-'}]
+                                        <strong>Goal:</strong>{' '}
+                                        {renderPlayerPicks(itemGoalSplit, match.incidents?.goals)}
                                       </p>
                                     ) : null}
                                     {item.yellow_card_players?.length ? (
                                       <p>
-                                        <strong>Yellow:</strong> {match.homeTeam.tla ?? 'Home'} [{itemYellowSplit.home || '-'}] | {match.awayTeam.tla ?? 'Away'} [{itemYellowSplit.away || '-'}]
+                                        <strong>Yellow:</strong>{' '}
+                                        {renderPlayerPicks(itemYellowSplit, match.incidents?.yellowCards)}
                                       </p>
                                     ) : null}
                                     {item.red_card_players?.length ? (
                                       <p>
-                                        <strong>Red:</strong> {match.homeTeam.tla ?? 'Home'} [{itemRedSplit.home || '-'}] | {match.awayTeam.tla ?? 'Away'} [{itemRedSplit.away || '-'}]
+                                        <strong>Red:</strong>{' '}
+                                        {renderPlayerPicks(itemRedSplit, match.incidents?.redCards)}
                                       </p>
                                     ) : null}
                                   </div>
@@ -5347,6 +5424,7 @@ type PredictionPoints = {
   goalEvent: number;
   yellowEvent: number;
   redEvent: number;
+  perfectBonus: number;
   total: number;
 };
 
@@ -5406,46 +5484,27 @@ function isMatchOpenForPrediction(match: Match, lockMinutes = 0, now = new Date(
 function calculatePredictionPoints(match: Match, prediction: MatchPrediction): PredictionPoints {
   const result = getMatchResult(match);
   if (!result) {
-    return { ready: false, winner: 0, ht: 0, ft: 0, goalEvent: 0, yellowEvent: 0, redEvent: 0, total: 0 };
+    return { ready: false, winner: 0, ht: 0, ft: 0, goalEvent: 0, yellowEvent: 0, redEvent: 0, perfectBonus: 0, total: 0 };
   }
 
   const predictedWinner = getWinner(prediction.ft_home, prediction.ft_away);
   const winner = predictedWinner === result.winner ? 1 : 0;
   const ht = prediction.ht_home === result.htHome && prediction.ht_away === result.htAway ? 1 : 0;
   const ft = prediction.ft_home === result.ftHome && prediction.ft_away === result.ftAway ? 1 : 0;
-  const normalize = (value: string) =>
-    value
-      .toLowerCase()
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z0-9\s'-]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-  const parsePredicted = (value: string) => {
-    if (value.startsWith(HOME_PICK_PREFIX)) return { name: value.slice(HOME_PICK_PREFIX.length), side: 'home' as const };
-    if (value.startsWith(AWAY_PICK_PREFIX)) return { name: value.slice(AWAY_PICK_PREFIX.length), side: 'away' as const };
-    return { name: value, side: null as 'home' | 'away' | null };
-  };
-  const homeTeamNormalized = normalize(match.homeTeam.name ?? '');
-  const awayTeamNormalized = normalize(match.awayTeam.name ?? '');
   const hasEventMatch = (predictedPlayers: string[] | undefined, incidents: MatchIncident[] | undefined) => {
     if (!predictedPlayers?.length || !incidents?.length) return 0;
-    const actual = incidents
-      .map((item) => ({
-        player: normalize(String(item.player ?? '')),
-        team: normalize(String(item.team ?? ''))
-      }))
-      .filter((item) => item.player.length > 0);
     return predictedPlayers.some((raw) => {
-      const predicted = parsePredicted(String(raw ?? ''));
-      const playerName = normalize(predicted.name);
-      if (!playerName) return false;
-      return actual.some((row) => {
-        if (row.player !== playerName) return false;
-        if (predicted.side === 'home' && homeTeamNormalized && row.team && row.team !== homeTeamNormalized) return false;
-        if (predicted.side === 'away' && awayTeamNormalized && row.team && row.team !== awayTeamNormalized) return false;
-        return true;
-      });
+      const value = String(raw ?? '');
+      if (value.startsWith(HOME_PICK_PREFIX)) {
+        return isPlayerPickHit(match, value.slice(HOME_PICK_PREFIX.length), 'home', incidents);
+      }
+      if (value.startsWith(AWAY_PICK_PREFIX)) {
+        return isPlayerPickHit(match, value.slice(AWAY_PICK_PREFIX.length), 'away', incidents);
+      }
+      return (
+        isPlayerPickHit(match, value, 'home', incidents) ||
+        isPlayerPickHit(match, value, 'away', incidents)
+      );
     })
       ? 1
       : 0;
@@ -5456,7 +5515,17 @@ function calculatePredictionPoints(match: Match, prediction: MatchPrediction): P
   const perfectBonus = winner === 1 && ht === 1 && ft === 1 ? 2 : 0;
   const eventBonus = goalEvent + yellowEvent + redEvent;
 
-  return { ready: true, winner, ht, ft, goalEvent, yellowEvent, redEvent, total: winner + ht + ft + perfectBonus + eventBonus };
+  return {
+    ready: true,
+    winner,
+    ht,
+    ft,
+    goalEvent,
+    yellowEvent,
+    redEvent,
+    perfectBonus,
+    total: winner + ht + ft + perfectBonus + eventBonus
+  };
 }
 
 function formatMatchDateTime(utcDate: string) {
