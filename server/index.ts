@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import nodemailer from 'nodemailer';
 import { createClient } from '@supabase/supabase-js';
-import { getBonusPickLimitForPoints } from './reward-system.js';
+import { countCorrectPlayerPicks, getBonusPickLimitForPoints } from './reward-system.js';
 
 const app = express();
 const port = Number(process.env.PORT ?? 8787);
@@ -84,8 +84,8 @@ type MatchApi = {
   status?: string;
   utcDate?: string;
   matchday?: number;
-  homeTeam?: { name?: string };
-  awayTeam?: { name?: string };
+  homeTeam?: { name?: string; shortName?: string; tla?: string };
+  awayTeam?: { name?: string; shortName?: string; tla?: string };
   competition?: { id?: number };
   incidents?: {
     goals?: Array<{ minute?: string; team?: string; player?: string; text?: string }>;
@@ -1186,43 +1186,6 @@ async function loadUserGroupTotalPoints(groupId: string, userUid: string) {
   return (data ?? []).reduce((sum, row) => sum + Number(row.total_points ?? 0), 0);
 }
 
-function hasAnyPlayerMatch(
-  predicted: string[],
-  incidents: Array<{ player?: string; team?: string }>,
-  match: MatchApi
-) {
-  if (!predicted.length || !incidents.length) return false;
-  const parsePredicted = (value: string) => {
-    if (value.startsWith('HOME::')) return { side: 'home' as const, name: value.slice('HOME::'.length) };
-    if (value.startsWith('AWAY::')) return { side: 'away' as const, name: value.slice('AWAY::'.length) };
-    return { side: null as 'home' | 'away' | null, name: value };
-  };
-  const homeTeamNormalized = normalizeNameForCompare(String(match.homeTeam?.name ?? ''));
-  const awayTeamNormalized = normalizeNameForCompare(String(match.awayTeam?.name ?? ''));
-  const actualRows = incidents
-    .map((item) => ({
-      player: normalizeNameForCompare(String(item.player ?? '')),
-      team: normalizeNameForCompare(String(item.team ?? ''))
-    }))
-    .filter((row) => row.player.length > 0);
-
-  for (const raw of predicted) {
-    const parsed = parsePredicted(String(raw ?? ''));
-    const targetPlayer = normalizeNameForCompare(parsed.name);
-    if (!targetPlayer) continue;
-    const found = actualRows.some((row) => {
-      if (row.player !== targetPlayer) return false;
-      if (parsed.side === 'home' && homeTeamNormalized && row.team && row.team !== homeTeamNormalized) return false;
-      if (parsed.side === 'away' && awayTeamNormalized && row.team && row.team !== awayTeamNormalized) return false;
-      return true;
-    });
-    if (found) {
-      return true;
-    }
-  }
-  return false;
-}
-
 function getWeekStart(dateInput: string | Date) {
   const date = typeof dateInput === 'string' ? new Date(dateInput) : new Date(dateInput.getTime());
   const day = date.getUTCDay();
@@ -1386,21 +1349,21 @@ function calculatePointsForPrediction(params: {
   const ftPoints = params.prediction.ft_home === ftHome && params.prediction.ft_away === ftAway ? 1 : 0;
   const baseTotal = winnerPoints + htPoints + ftPoints;
   const perfectBonusPoints = baseTotal === 3 ? 2 : 0;
-  const goalEventBonus = hasAnyPlayerMatch(params.prediction.goal_players ?? [], params.match.incidents?.goals ?? [], params.match) ? 1 : 0;
-  const yellowEventBonus = hasAnyPlayerMatch(
+  const goalEventBonus = countCorrectPlayerPicks(
+    params.prediction.goal_players ?? [],
+    params.match.incidents?.goals ?? [],
+    params.match
+  );
+  const yellowEventBonus = countCorrectPlayerPicks(
     params.prediction.yellow_card_players ?? [],
     params.match.incidents?.yellowCards ?? [],
     params.match
-  )
-    ? 1
-    : 0;
-  const redEventBonus = hasAnyPlayerMatch(
+  );
+  const redEventBonus = countCorrectPlayerPicks(
     params.prediction.red_card_players ?? [],
     params.match.incidents?.redCards ?? [],
     params.match
-  )
-    ? 1
-    : 0;
+  );
   const eventBonusPoints = goalEventBonus + yellowEventBonus + redEventBonus;
   const matchBonusPoints = Math.max(0, Math.round(baseTotal * (params.bonusMultiplier - 1)));
   const bonusPoints = perfectBonusPoints + eventBonusPoints + matchBonusPoints;

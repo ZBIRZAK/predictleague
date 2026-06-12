@@ -48,6 +48,7 @@ import {
   type StatusFilter
 } from './lib/match-utils';
 import { REWARD_TIERS, getRewardProgress } from './lib/reward-system';
+import { countCorrectPlayerPicks, isCorrectPlayerPick } from '../server/reward-system';
 
 type Competition = {
   id: number;
@@ -521,16 +522,11 @@ function isPlayerPickHit(
   side: 'home' | 'away',
   incidents: MatchIncident[] | undefined
 ) {
-  const normalizedPlayer = normalizePlayerToken(playerName);
-  if (!normalizedPlayer || !incidents?.length) return false;
-  const team = side === 'home' ? match.homeTeam : match.awayTeam;
-  const normalizedTeam = normalizePlayerToken(String(team.name ?? ''));
-
-  return incidents.some((incident) => {
-    if (normalizePlayerToken(String(incident.player ?? '')) !== normalizedPlayer) return false;
-    const incidentTeam = normalizePlayerToken(String(incident.team ?? ''));
-    return !normalizedTeam || !incidentTeam || incidentTeam === normalizedTeam;
-  });
+  return isCorrectPlayerPick(
+    `${side === 'home' ? HOME_PICK_PREFIX : AWAY_PICK_PREFIX}${playerName}`,
+    incidents ?? [],
+    match
+  );
 }
 
 function normalizePlayerPicksCsv(value: string) {
@@ -3959,9 +3955,9 @@ function App() {
                   <p>Winner correct: <strong>+1</strong></p>
                   <p>Half-time exact score: <strong>+1</strong></p>
                   <p>Full-time exact score: <strong>+1</strong></p>
-                  <p>Goal player pick hit (optional): <strong>+1</strong></p>
-                  <p>Yellow-card player pick hit (optional): <strong>+1</strong></p>
-                  <p>Red-card player pick hit (optional): <strong>+1</strong></p>
+                  <p>Each correct goal player pick (optional): <strong>+1</strong></p>
+                  <p>Each correct yellow-card player pick (optional): <strong>+1</strong></p>
+                  <p>Each correct red-card player pick (optional): <strong>+1</strong></p>
                   <p>Perfect prediction (winner + HT + FT all correct): <strong>+2 bonus</strong></p>
                   <p className="muted">
                     Bonus player-pick capacity unlocks by tier (currently {rewardProgress.tier.title}: {eventPickLimitPerTeam} picks/team).
@@ -4746,9 +4742,12 @@ function App() {
                                 { label: 'Correct winner', value: points.winner },
                                 { label: '45 min exact score', value: points.ht },
                                 { label: 'Final exact score', value: points.ft },
-                                { label: 'Goal player hit', value: points.goalEvent },
-                                { label: 'Yellow-card player hit', value: points.yellowEvent },
-                                { label: 'Red-card player hit', value: points.redEvent },
+                                { label: `Goal player hit${points.goalEvent === 1 ? '' : 's'}`, value: points.goalEvent },
+                                {
+                                  label: `Yellow-card player hit${points.yellowEvent === 1 ? '' : 's'}`,
+                                  value: points.yellowEvent
+                                },
+                                { label: `Red-card player hit${points.redEvent === 1 ? '' : 's'}`, value: points.redEvent },
                                 { label: 'Perfect prediction bonus', value: points.perfectBonus }
                               ].filter((entry) => entry.value > 0);
                               const renderPlayerPicks = (
@@ -5511,27 +5510,13 @@ function calculatePredictionPoints(match: Match, prediction: MatchPrediction): P
   const winner = predictedWinner === result.winner ? 1 : 0;
   const ht = prediction.ht_home === result.htHome && prediction.ht_away === result.htAway ? 1 : 0;
   const ft = prediction.ft_home === result.ftHome && prediction.ft_away === result.ftAway ? 1 : 0;
-  const hasEventMatch = (predictedPlayers: string[] | undefined, incidents: MatchIncident[] | undefined) => {
-    if (!predictedPlayers?.length || !incidents?.length) return 0;
-    return predictedPlayers.some((raw) => {
-      const value = String(raw ?? '');
-      if (value.startsWith(HOME_PICK_PREFIX)) {
-        return isPlayerPickHit(match, value.slice(HOME_PICK_PREFIX.length), 'home', incidents);
-      }
-      if (value.startsWith(AWAY_PICK_PREFIX)) {
-        return isPlayerPickHit(match, value.slice(AWAY_PICK_PREFIX.length), 'away', incidents);
-      }
-      return (
-        isPlayerPickHit(match, value, 'home', incidents) ||
-        isPlayerPickHit(match, value, 'away', incidents)
-      );
-    })
-      ? 1
-      : 0;
-  };
-  const goalEvent = hasEventMatch(prediction.goal_players, match.incidents?.goals);
-  const yellowEvent = hasEventMatch(prediction.yellow_card_players, match.incidents?.yellowCards);
-  const redEvent = hasEventMatch(prediction.red_card_players, match.incidents?.redCards);
+  const goalEvent = countCorrectPlayerPicks(prediction.goal_players ?? [], match.incidents?.goals ?? [], match);
+  const yellowEvent = countCorrectPlayerPicks(
+    prediction.yellow_card_players ?? [],
+    match.incidents?.yellowCards ?? [],
+    match
+  );
+  const redEvent = countCorrectPlayerPicks(prediction.red_card_players ?? [], match.incidents?.redCards ?? [], match);
   const perfectBonus = winner === 1 && ht === 1 && ft === 1 ? 2 : 0;
   const eventBonus = goalEvent + yellowEvent + redEvent;
 
