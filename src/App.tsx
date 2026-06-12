@@ -1009,6 +1009,7 @@ function App() {
   const [groupMatches, setGroupMatches] = useState<Match[]>([]);
   const [myPredictions, setMyPredictions] = useState<Record<number, MatchPrediction>>({});
   const [groupPredictionsByMatch, setGroupPredictionsByMatch] = useState<Record<number, MatchPrediction[]>>({});
+  const activeGroupDataKeyRef = useRef('');
   const [predictionDrafts, setPredictionDrafts] = useState<Record<number, PredictionDraft>>({});
   const [leaderboardScope, setLeaderboardScope] = useState<'total' | 'weekly'>('total');
   const [groupLeaderboardData, setGroupLeaderboardData] = useState<GroupLeaderboard | null>(null);
@@ -1569,6 +1570,7 @@ function App() {
   useEffect(() => {
     const isGuestGuideDemo = inPageGuideActive && selectedGroup?.id === GUIDE_DEMO_GROUP_ID;
     if (!selectedGroup || (!user && !isGuestGuideDemo)) {
+      activeGroupDataKeyRef.current = '';
       setGroupMatches([]);
       setSelectedGroupCustomMatches([]);
       setMyPredictions({});
@@ -1583,11 +1585,16 @@ function App() {
     setLockMinutesInput(String(selectedGroup.prediction_lock_minutes ?? 0));
     setBonusEnabledInput(Boolean(selectedGroup.bonus_enabled));
     if (selectedGroup.id === GUIDE_DEMO_GROUP_ID) {
+      activeGroupDataKeyRef.current = '';
       setGroupMatchesLoading(false);
       return;
     }
     if (!user) return;
-    void loadGroupData(user.uid, selectedGroup, groupViewDate);
+    const requestKey = `${user.uid}:${selectedGroup.id}:${groupViewDate}`;
+    activeGroupDataKeyRef.current = requestKey;
+    setGroupPredictionsByMatch({});
+    setMyPredictions({});
+    void loadGroupData(user.uid, selectedGroup, groupViewDate, requestKey);
   }, [selectedGroup, user, groupViewDate, inPageGuideActive]);
 
   useEffect(() => {
@@ -2127,7 +2134,7 @@ function App() {
     }
   }
 
-  async function loadGroupData(userUid: string, group: AppGroup, targetDate: string) {
+  async function loadGroupData(userUid: string, group: AppGroup, targetDate: string, requestKey: string) {
     try {
       setGroupMatchesLoading(true);
       setError('');
@@ -2139,6 +2146,7 @@ function App() {
         loadMatchesForGroupSelection(group, targetDate)
       ]);
 
+      if (activeGroupDataKeyRef.current !== requestKey) return;
       setInvites(inviteRows);
       setGroupMembers(memberRows);
       setGroupMatches(matchRows);
@@ -2180,9 +2188,13 @@ function App() {
         loadGroupBonusData(group.id)
       ]);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load group data.');
+      if (activeGroupDataKeyRef.current === requestKey) {
+        setError(err instanceof Error ? err.message : 'Failed to load group data.');
+      }
     } finally {
-      setGroupMatchesLoading(false);
+      if (activeGroupDataKeyRef.current === requestKey) {
+        setGroupMatchesLoading(false);
+      }
     }
   }
 
@@ -2212,6 +2224,7 @@ function App() {
   }
 
   async function refreshGroupRealtimeData(group: AppGroup, userUid: string, scope: 'total' | 'weekly', targetDate: string) {
+    const requestKey = `${userUid}:${group.id}:${targetDate}`;
     try {
       const [predictionRows, leaderboardData, inviteRows] = await Promise.all([
         loadPredictionsForGroup({ groupId: group.id, matchDate: targetDate }),
@@ -2222,6 +2235,14 @@ function App() {
         }),
         loadInvitesForGroup(group.id)
       ]);
+
+      if (activeGroupDataKeyRef.current !== requestKey) return;
+      if (predictionRows.length === 0) {
+        setGroupLeaderboardData(leaderboardData);
+        setInvites(inviteRows);
+        void loadGroupTotalLeaderboardData(group.id, targetDate);
+        return;
+      }
 
       const mine = predictionRows.filter((row) => row.user_uid === userUid);
       const mineMap = Object.fromEntries(mine.map((row) => [row.match_id, row]));
