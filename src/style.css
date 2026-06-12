@@ -1095,6 +1095,22 @@ button:disabled {
   background: rgba(246, 191, 47, 0.14);
 }
 
+.prediction-unsaved-alert {
+  margin: 0;
+  padding: 0.58rem 0.68rem;
+  border: 1px solid rgba(255, 74, 74, 0.62);
+  border-radius: 10px;
+  background: rgba(255, 74, 74, 0.14);
+  color: #ffdede;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.save-all-pending {
+  border-color: rgba(246, 191, 47, 0.72);
+  box-shadow: 0 0 0 2px rgba(246, 191, 47, 0.12);
+}
+
 .invite-list {
   margin-top: 0.6rem;
   display: grid;
@@ -2988,6 +3004,12 @@ button:disabled {
 
 :root:not([data-theme='dark']) .prediction-lock-alert {
   color: #8f1322;
+}
+
+:root:not([data-theme='dark']) .prediction-unsaved-alert {
+  background: #fff0f0;
+  border-color: #efb6b6;
+  color: #9b1c2c;
 }
 
 :root:not([data-theme='dark']) .prediction-draft-dirty {

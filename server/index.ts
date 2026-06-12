@@ -216,6 +216,19 @@ function toYmd(value: Date) {
   return `${y}${m}${d}`;
 }
 
+function getAdjacentDateRange(value: string) {
+  const parsed = parseYmd(value);
+  if (!parsed) return null;
+  const from = new Date(parsed);
+  from.setUTCDate(from.getUTCDate() - 1);
+  const to = new Date(parsed);
+  to.setUTCDate(to.getUTCDate() + 1);
+  return {
+    from: from.toISOString().slice(0, 10),
+    to: to.toISOString().slice(0, 10)
+  };
+}
+
 function enumerateDates(from: string, to: string) {
   const start = parseYmd(from);
   const end = parseYmd(to);
@@ -1220,7 +1233,9 @@ async function fetchMatchForCompetition(params: {
   }
 
   if (matchDate) {
-    const matches = await fetchEspnLeagueMatchesInRange(espnLeague, matchDate, matchDate);
+    const range = getAdjacentDateRange(matchDate);
+    if (!range) return null;
+    const matches = await fetchEspnLeagueMatchesInRange(espnLeague, range.from, range.to);
     const found = matches.find((item) => Number((item as Record<string, unknown>).id ?? 0) === matchId);
     if (found) {
       const normalized = found as unknown as MatchApi;
@@ -1257,7 +1272,9 @@ async function fetchCompetitionMatchesForDate(params: {
   if (!espnLeague) {
     return [];
   }
-  const matches = await fetchEspnLeagueMatchesInRange(espnLeague, matchDate, matchDate);
+  const range = getAdjacentDateRange(matchDate);
+  if (!range) return [];
+  const matches = await fetchEspnLeagueMatchesInRange(espnLeague, range.from, range.to);
   return matches.map((row) => ({
     id: Number((row as Record<string, unknown>).id ?? 0),
     competition: {
@@ -1288,7 +1305,9 @@ async function fetchMatchForAnyCompetition(params: { matchId: number; matchDate?
   }
 
   if (matchDate) {
-    const matches = await fetchEspnMatchesInRange(matchDate, matchDate);
+    const range = getAdjacentDateRange(matchDate);
+    if (!range) return null;
+    const matches = await fetchEspnMatchesInRange(range.from, range.to);
     const found = matches.find((item) => Number((item as Record<string, unknown>).id ?? 0) === matchId);
     if (found) {
       const normalized = found as unknown as MatchApi;
@@ -1697,7 +1716,12 @@ app.post('/internal/db/groups', requireFirebaseAuth, async (req: AuthedRequest, 
   try {
     let validatedCustomMatches: number[] = [];
     if (normalizedMode === 'custom') {
-      const allMatchesForDate = await fetchEspnMatchesInRange(normalizedCustomMatchDate, normalizedCustomMatchDate);
+      const range = getAdjacentDateRange(normalizedCustomMatchDate);
+      if (!range) {
+        res.status(400).json({ error: 'Invalid custom match date.' });
+        return;
+      }
+      const allMatchesForDate = await fetchEspnMatchesInRange(range.from, range.to);
       const allowedIds = new Set(allMatchesForDate.map((item) => Number((item as Record<string, unknown>).id ?? 0)).filter(Boolean));
       validatedCustomMatches = normalizedCustomMatches.filter((matchId) => allowedIds.has(matchId));
       if (validatedCustomMatches.length === 0) {
@@ -2141,7 +2165,12 @@ app.put('/internal/db/groups/:groupId/custom-matches', requireFirebaseAuth, asyn
       return;
     }
 
-    const allMatchesForDate = await fetchEspnMatchesInRange(matchDate, matchDate);
+    const range = getAdjacentDateRange(matchDate);
+    if (!range) {
+      res.status(400).json({ error: 'Invalid match date.' });
+      return;
+    }
+    const allMatchesForDate = await fetchEspnMatchesInRange(range.from, range.to);
     const allowedIds = new Set(allMatchesForDate.map((item) => Number((item as Record<string, unknown>).id ?? 0)).filter(Boolean));
     const validIds = normalizedMatchIds.filter((matchId) => allowedIds.has(matchId));
 

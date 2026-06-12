@@ -1217,6 +1217,8 @@ function App() {
     return total;
   }, [groupMatches, myPredictions, predictionDrafts]);
   const isViewingToday = groupViewDate === today;
+  const isViewingTomorrow = groupViewDate === tomorrowDate;
+  const isPredictionDate = isViewingToday || isViewingTomorrow;
 
   const selectableSelectedGroupCustomPool = useMemo(
     () => selectedGroupCustomPool.filter(isSelectableCustomMatch),
@@ -1530,6 +1532,16 @@ function App() {
   }, [gameTourActive, gameTourStepIndex, gameTourTarget]);
 
   useEffect(() => {
+    if (unsavedDraftCount === 0) return;
+    const warnAboutUnsavedPredictions = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnAboutUnsavedPredictions);
+    return () => window.removeEventListener('beforeunload', warnAboutUnsavedPredictions);
+  }, [unsavedDraftCount]);
+
+  useEffect(() => {
     if (!inPageGuideActive || page !== 'game') return;
     const id = window.setTimeout(() => {
       const target = getCurrentGuideTarget();
@@ -1612,7 +1624,7 @@ function App() {
   }, [selectedGroupId]);
 
   useEffect(() => {
-    if (page !== 'game' || !selectedGroup || !user || selectedGroup.id === GUIDE_DEMO_GROUP_ID || !isViewingToday) return;
+    if (page !== 'game' || !selectedGroup || !user || selectedGroup.id === GUIDE_DEMO_GROUP_ID || !isPredictionDate) return;
 
     const tick = () => {
       if (document.visibilityState !== 'visible') return;
@@ -1636,7 +1648,7 @@ function App() {
       document.removeEventListener('visibilitychange', onVisibilityChange);
       window.removeEventListener('focus', onFocus);
     };
-  }, [page, selectedGroup, user, today, leaderboardScope, groupViewDate, isViewingToday]);
+  }, [page, selectedGroup, user, today, leaderboardScope, groupViewDate, isPredictionDate]);
 
   useEffect(() => {
     if (!selectedGroup || !user) return;
@@ -1664,7 +1676,7 @@ function App() {
     const load = async () => {
       try {
         setSelectedGroupCustomPoolLoading(true);
-        const matches = (await loadAllMatchesForDate(today)).filter(isSelectableCustomMatch);
+        const matches = (await loadAllMatchesForDate(groupViewDate)).filter(isSelectableCustomMatch);
         if (cancelled) return;
         setSelectedGroupCustomPool(matches);
       } catch {
@@ -1681,7 +1693,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedGroup?.id, selectedGroup?.match_selection_mode, today]);
+  }, [selectedGroup?.id, selectedGroup?.match_selection_mode, groupViewDate]);
 
   useEffect(() => {
     if (groupMatches.length === 0) return;
@@ -1927,7 +1939,10 @@ function App() {
   }
 
   async function loadMatchesForCompetition(competitionId: number, targetDate: string) {
-    const query = new URLSearchParams({ dateFrom: targetDate, dateTo: targetDate });
+    const query = new URLSearchParams({
+      dateFrom: shiftLocalDate(targetDate, -1),
+      dateTo: shiftLocalDate(targetDate, 1)
+    });
     const response = await fetch(`/api/v4/competitions/${competitionId}/matches?${query.toString()}`, { cache: 'no-store' });
     if (!response.ok) {
       throw new Error('Failed to fetch today matches.');
@@ -1938,7 +1953,10 @@ function App() {
   }
 
   async function loadAllMatchesForDate(targetDate: string) {
-    const query = new URLSearchParams({ dateFrom: targetDate, dateTo: targetDate });
+    const query = new URLSearchParams({
+      dateFrom: shiftLocalDate(targetDate, -1),
+      dateTo: shiftLocalDate(targetDate, 1)
+    });
     const response = await fetch(`/api/v4/matches?${query.toString()}`, { cache: 'no-store' });
     if (!response.ok) {
       throw new Error('Failed to fetch matches.');
@@ -2631,8 +2649,8 @@ function App() {
     if (!user || !selectedGroup) {
       return;
     }
-    if (!isViewingToday) {
-      setError('History mode is read-only. Switch date to today to save predictions.');
+    if (!isPredictionDate) {
+      setError('Predictions can only be saved for today or tomorrow.');
       return;
     }
 
@@ -2719,6 +2737,17 @@ function App() {
     } finally {
       setSavingAll(false);
     }
+  }
+
+  function changePredictionDate(nextDate: string) {
+    if (nextDate === groupViewDate) return;
+    if (
+      unsavedDraftCount > 0 &&
+      !window.confirm('You have unsaved predictions. Switch dates and discard those unsaved changes?')
+    ) {
+      return;
+    }
+    setGroupViewDate(nextDate);
   }
 
   function markGameTourSeen() {
@@ -4104,7 +4133,7 @@ function App() {
                         <div className="custom-selection-panel">
                           <div className="custom-selection-head">
                             <strong>Custom Match Selection</strong>
-                            <span className="muted">Pick matches from any competition for today.</span>
+                            <span className="muted">Pick matches from any competition for {isViewingTomorrow ? 'tomorrow' : 'today'}.</span>
                           </div>
                           <div className="quick-status custom-selection-stats">
                             <span className="group-chip">Available: {filteredSelectedGroupCustomPool.length}</span>
@@ -4144,7 +4173,9 @@ function App() {
                           <div className="custom-selection-list">
                             {selectedGroupCustomPoolLoading ? <p className="muted">Loading available matches...</p> : null}
                             {!selectedGroupCustomPoolLoading && filteredSelectedGroupCustomPool.length === 0 ? (
-                              <p className="muted">No available matches found for today/filter.</p>
+                              <p className="muted">
+                                No available matches found for {isViewingTomorrow ? 'tomorrow' : 'today'}/filter.
+                              </p>
                             ) : null}
                             {filteredSelectedGroupCustomPool.map((match) => (
                               <label key={`custom-${match.id}`} className="group-custom-match-row">
@@ -4190,7 +4221,7 @@ function App() {
                         <label>
                           Bonus Match
                           <select value={bonusMatchIdInput} onChange={(e) => setBonusMatchIdInput(e.target.value)}>
-                            <option value="">Select today match</option>
+                            <option value="">Select {isViewingTomorrow ? 'tomorrow' : 'today'} match</option>
                             {groupMatches.map((match) => (
                               <option key={match.id} value={match.id}>
                                 {match.homeTeam.name} vs {match.awayTeam.name}
@@ -4253,19 +4284,35 @@ function App() {
                       <input
                         type="date"
                         value={groupViewDate}
-                        max={today}
+                        max={tomorrowDate}
                         onChange={(e) => {
-                          const next = e.target.value;
-                          if (!next) return;
-                          setGroupViewDate(next > today ? today : next);
+                          const nextDate = e.target.value;
+                          if (nextDate) changePredictionDate(nextDate);
                         }}
                       />
                     </label>
-                    <button type="button" className="details-btn" onClick={() => setGroupViewDate(today)} disabled={isViewingToday}>
-                      Go To Today
+                    <button
+                      type="button"
+                      className={`details-btn ${isViewingToday ? 'chip-active' : ''}`}
+                      onClick={() => changePredictionDate(today)}
+                    >
+                      Today
+                    </button>
+                    <button
+                      type="button"
+                      className={`details-btn ${isViewingTomorrow ? 'chip-active' : ''}`}
+                      onClick={() => changePredictionDate(tomorrowDate)}
+                    >
+                      Tomorrow
                     </button>
                   </div>
-                  {!isViewingToday ? <p className="muted">History mode: viewing saved results for {groupViewDate}.</p> : null}
+                  {!isPredictionDate ? (
+                    <p className="muted">History mode: viewing saved results for {groupViewDate}. Predictions are read-only.</p>
+                  ) : (
+                    <p className="muted">
+                      Showing {isViewingTomorrow ? 'tomorrow' : 'today'}: {groupViewDate}
+                    </p>
+                  )}
                   <div className="quick-status">
                     <span className="group-chip">Matches: {groupMatches.length}</span>
                     <span className="group-chip">Completed Drafts: {completedDraftCount}</span>
@@ -4274,6 +4321,11 @@ function App() {
                     <span className="group-chip">Tier: {rewardProgress.tier.title}</span>
                     <span className="group-chip">Bonus picks/team: {eventPickLimitPerTeam}</span>
                   </div>
+                  {unsavedDraftCount > 0 ? (
+                    <p className="prediction-unsaved-alert">
+                      {unsavedDraftCount} completed prediction{unsavedDraftCount === 1 ? '' : 's'} will not earn points until saved.
+                    </p>
+                  ) : null}
                   <article className="reward-track-card">
                     <div className="reward-track-head">
                       <strong>Reward Track</strong>
@@ -4303,14 +4355,22 @@ function App() {
                   </article>
                   <button
                     type="button"
-                    className={`refresh ${
+                    className={`refresh ${unsavedDraftCount > 0 ? 'save-all-pending' : ''} ${
                       inPageGuideActive && guideActionIndex === 10 ? 'guide-focus-target guide-arrow-target guide-arrow-inline' : ''
                     }`}
                     data-guide-arrow={inPageGuideActive && guideActionIndex === 10 ? 'Click Save All Predictions' : undefined}
-                    disabled={savingAll || busy || groupMatchesLoading || !isViewingToday}
+                    disabled={savingAll || busy || groupMatchesLoading || !isPredictionDate}
                     onClick={() => void handleSaveAllPredictions()}
                   >
-                    {savingAll ? 'Saving...' : !isViewingToday ? 'History View (Read-only)' : 'Save All Predictions'}
+                    {savingAll
+                      ? 'Saving...'
+                      : !isPredictionDate
+                        ? 'Only Today or Tomorrow'
+                        : unsavedDraftCount > 0
+                          ? `Save ${unsavedDraftCount} Unsaved Prediction${unsavedDraftCount === 1 ? '' : 's'}`
+                          : completedDraftCount > 0
+                            ? 'All Predictions Saved'
+                            : 'Save All Predictions'}
                   </button>
                 </section>
               ) : null}
