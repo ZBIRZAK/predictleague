@@ -2788,8 +2788,9 @@ const apiProxyHandler = async (req: express.Request, res: express.Response) => {
         return;
       }
       const matches = await fetchEspnLeagueMatchesInRange(espnLeague, dateFrom, dateTo);
-      const enriched = await enrichMatchesWithSummaryIfNeeded(matches, espnLeague);
-      res.status(200).json({ matches: enriched });
+      const shouldEnrich = upstreamUrl.searchParams.get('enrich') !== 'false';
+      const payloadMatches = shouldEnrich ? await enrichMatchesWithSummaryIfNeeded(matches, espnLeague) : matches;
+      res.status(200).json({ matches: payloadMatches });
       return;
     }
 
@@ -2856,56 +2857,38 @@ const apiProxyHandler = async (req: express.Request, res: express.Response) => {
     if (method === 'GET' && pathname.startsWith('/v4/matches/')) {
       const idPart = pathname.replace('/v4/matches/', '').split('/')[0];
       const matchId = Number(idPart);
-      if (Number.isFinite(matchId) && espnEventById.has(matchId)) {
-        const event = espnEventById.get(matchId) as Record<string, unknown>;
-        const leagueKey = espnLeagueByEventId.get(matchId) ?? '';
-        const match = normalizeEspnEvent(event, undefined, leagueKey);
-        if (leagueKey) {
-          try {
-            const summary = await fetchEspnJson(`/apis/site/v2/sports/soccer/${leagueKey}/summary?event=${matchId}`, 12000);
-            const summaryCompetition = Array.isArray((summary.header as Record<string, unknown> | undefined)?.competitions)
-              ? (((summary.header as Record<string, unknown>).competitions as Array<Record<string, unknown>>)[0] ?? null)
-              : null;
-            const summaryCompetitors = Array.isArray(summaryCompetition?.competitors)
-              ? (summaryCompetition?.competitors as Array<Record<string, unknown>>)
-              : [];
-            const summaryHome = summaryCompetitors.find(
-              (item) => String((item.homeAway as string | undefined) ?? '').toLowerCase() === 'home'
-            );
-            const summaryAway = summaryCompetitors.find(
-              (item) => String((item.homeAway as string | undefined) ?? '').toLowerCase() === 'away'
-            );
-            const summaryHomeLines = Array.isArray(summaryHome?.linescores)
-              ? (summaryHome?.linescores as Array<Record<string, unknown>>)
-              : [];
-            const summaryAwayLines = Array.isArray(summaryAway?.linescores)
-              ? (summaryAway?.linescores as Array<Record<string, unknown>>)
-              : [];
-            const summaryHtHome = asNumber(summaryHomeLines[0]?.value ?? summaryHomeLines[0]?.displayValue);
-            const summaryHtAway = asNumber(summaryAwayLines[0]?.value ?? summaryAwayLines[0]?.displayValue);
-            if (summaryHtHome !== null && summaryHtAway !== null) {
-              (match as Record<string, unknown>).score = {
-                ...(match.score as Record<string, unknown>),
-                halfTime: { home: summaryHtHome, away: summaryHtAway }
-              };
-            }
-            const summaryFtHome = asNumber(summaryHome?.score);
-            const summaryFtAway = asNumber(summaryAway?.score);
-            if (summaryFtHome !== null && summaryFtAway !== null) {
-              (match as Record<string, unknown>).score = {
-                ...(match.score as Record<string, unknown>),
-                winner: mapEspnWinner(summaryFtHome, summaryFtAway),
-                fullTime: { home: summaryFtHome, away: summaryFtAway }
-              };
-            }
-            const incidents = await extractEspnIncidents(summary);
-            (match as Record<string, unknown>).incidents = incidents;
-          } catch {
-            // Keep basic match payload if summary endpoint fails.
+      if (Number.isFinite(matchId)) {
+        let leagueKey = espnLeagueByEventId.get(matchId) ?? '';
+        let match: MatchApi | null = null;
+        const cachedEvent = espnEventById.get(matchId);
+        if (cachedEvent) {
+          match = normalizeEspnEvent(cachedEvent, undefined, leagueKey) as unknown as MatchApi;
+        } else {
+          const matchDate = upstreamUrl.searchParams.get('matchDate') ?? '';
+          const competitionId = Number(upstreamUrl.searchParams.get('competitionId') ?? Number.NaN);
+          leagueKey = Number.isFinite(competitionId) ? getEspnLeagueByFootballCompetitionId(competitionId) ?? '' : '';
+          const range = getAdjacentDateRange(matchDate);
+          if (leagueKey && range) {
+            const matches = await fetchEspnLeagueMatchesInRange(leagueKey, range.from, range.to);
+            match =
+              (matches.find((row) => Number((row as Record<string, unknown>).id ?? 0) === matchId) as unknown as MatchApi) ??
+              null;
+          } else if (range) {
+            const matches = await fetchEspnMatchesInRange(range.from, range.to);
+            match =
+              (matches.find((row) => Number((row as Record<string, unknown>).id ?? 0) === matchId) as unknown as MatchApi) ??
+              null;
+            const resolvedCompetitionId = Number(match?.competition?.id ?? Number.NaN);
+            leagueKey = Number.isFinite(resolvedCompetitionId)
+              ? getEspnLeagueByFootballCompetitionId(resolvedCompetitionId) ?? ''
+              : '';
           }
         }
-        res.status(200).json({ match });
-        return;
+        if (match) {
+          const detailedMatch = leagueKey ? await enrichMatchScoreFromSummary(match, leagueKey, matchId) : match;
+          res.status(200).json({ match: detailedMatch });
+          return;
+        }
       }
     }
 

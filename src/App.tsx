@@ -1632,8 +1632,6 @@ function App() {
       void refreshGroupRealtimeData(selectedGroup, user.uid, leaderboardScope, groupViewDate);
     };
 
-    tick();
-
     const intervalId = window.setInterval(() => {
       tick();
     }, 15000);
@@ -1941,7 +1939,8 @@ function App() {
   async function loadMatchesForCompetition(competitionId: number, targetDate: string) {
     const query = new URLSearchParams({
       dateFrom: shiftLocalDate(targetDate, -1),
-      dateTo: shiftLocalDate(targetDate, 1)
+      dateTo: shiftLocalDate(targetDate, 1),
+      enrich: 'false'
     });
     const response = await fetch(`/api/v4/competitions/${competitionId}/matches?${query.toString()}`, { cache: 'no-store' });
     if (!response.ok) {
@@ -1965,8 +1964,13 @@ function App() {
     return (payload.matches ?? []).filter((match) => toLocalDateInputValue(match.utcDate) === targetDate);
   }
 
-  async function loadMatchById(matchId: number) {
-    const response = await fetch(`/api/v4/matches/${matchId}`, { cache: 'no-store' });
+  async function loadMatchById(matchId: number, matchDate?: string, competitionId?: number) {
+    const query = new URLSearchParams();
+    if (matchDate) query.set('matchDate', matchDate);
+    if (competitionId !== undefined) query.set('competitionId', String(competitionId));
+    const response = await fetch(`/api/v4/matches/${matchId}${query.size > 0 ? `?${query.toString()}` : ''}`, {
+      cache: 'no-store'
+    });
     if (!response.ok) {
       return null;
     }
@@ -1974,11 +1978,11 @@ function App() {
     return payload.match ?? payload;
   }
 
-  async function loadMatchesByIds(matchIds: number[]) {
+  async function loadMatchesByIds(matchIds: number[], matchDate?: string) {
     const uniqueIds = Array.from(new Set(matchIds.filter((value) => Number.isFinite(value) && value > 0)));
     const rows = await Promise.all(
       uniqueIds.map(async (matchId) => {
-        const match = await loadMatchById(matchId);
+        const match = await loadMatchById(matchId, matchDate);
         return match;
       })
     );
@@ -1989,7 +1993,7 @@ function App() {
     if (group.match_selection_mode === 'custom') {
       const selected = await loadGroupCustomMatches(group.id, targetDate);
       setSelectedGroupCustomMatches(selected);
-      const matches = await loadMatchesByIds(selected.map((item) => item.match_id));
+      const matches = await loadMatchesByIds(selected.map((item) => item.match_id), targetDate);
       return matches
         .filter((match) => toLocalDateInputValue(match.utcDate) === targetDate)
         .sort((a, b) => Date.parse(a.utcDate) - Date.parse(b.utcDate));
@@ -2156,16 +2160,23 @@ function App() {
       setGroupMatchesLoading(true);
       setError('');
 
-      const [inviteRows, predictionRows, memberRows, matchRows] = await Promise.all([
-        loadInvitesForGroup(group.id),
+      void Promise.all([loadInvitesForGroup(group.id), loadGroupMembers(group.id)])
+        .then(([inviteRows, memberRows]) => {
+          if (activeGroupDataKeyRef.current !== requestKey) return;
+          setInvites(inviteRows);
+          setGroupMembers(memberRows);
+        })
+        .catch(() => {
+          // Keep match loading independent from secondary group metadata.
+        });
+      void loadGroupBonusData(group.id);
+
+      const [predictionRows, matchRows] = await Promise.all([
         loadPredictionsForGroup({ groupId: group.id, matchDate: targetDate }),
-        loadGroupMembers(group.id),
         loadMatchesForGroupSelection(group, targetDate)
       ]);
 
       if (activeGroupDataKeyRef.current !== requestKey) return;
-      setInvites(inviteRows);
-      setGroupMembers(memberRows);
       setGroupMatches(matchRows);
 
       const mine = predictionRows.filter((row) => row.user_uid === userUid);
@@ -2199,11 +2210,7 @@ function App() {
         };
       }
       setPredictionDrafts(nextDrafts);
-      await Promise.all([
-        loadGroupLeaderboardData(group.id, leaderboardScope, targetDate),
-        ...(leaderboardScope === 'total' ? [] : [loadGroupTotalLeaderboardData(group.id, targetDate)]),
-        loadGroupBonusData(group.id)
-      ]);
+      void enrichGroupMatchResults(matchRows, requestKey);
     } catch (err) {
       if (activeGroupDataKeyRef.current === requestKey) {
         setError(err instanceof Error ? err.message : 'Failed to load group data.');
@@ -2215,19 +2222,64 @@ function App() {
     }
   }
 
+  async function enrichGroupMatchResults(matches: Match[], requestKey: string) {
+    const matchesNeedingDetails = matches.filter((match) => {
+      const status = String(match.status ?? '').toUpperCase();
+      const kickoffMs = Date.parse(match.utcDate);
+      return (
+        status === 'FINISHED' ||
+        LIVE_MATCH_STATUSES.has(status) ||
+        (!Number.isNaN(kickoffMs) && kickoffMs <= Date.now())
+      );
+    });
+    if (matchesNeedingDetails.length === 0) return;
+
+    const detailedEntries = await Promise.all(
+      matchesNeedingDetails.map(async (match) => {
+        try {
+          return [
+            match.id,
+            await loadMatchById(match.id, toLocalDateInputValue(match.utcDate), match.competition?.id)
+          ] as const;
+        } catch {
+          return [match.id, null] as const;
+        }
+      })
+    );
+    if (activeGroupDataKeyRef.current !== requestKey) return;
+    const detailsById = new Map(detailedEntries.filter((entry) => entry[1]).map(([matchId, details]) => [matchId, details as Match]));
+    setGroupMatches((current) => current.map((match) => detailsById.get(match.id) ?? match));
+  }
+
   async function refreshGroupMatchesOnly(group: AppGroup, targetDate: string) {
     try {
       const latestMatches = await loadMatchesForGroupSelection(group, targetDate);
-      const liveMatches = latestMatches.filter((match) => LIVE_MATCH_STATUSES.has(String(match.status ?? '').toUpperCase()));
-      if (liveMatches.length === 0) {
+      const matchesNeedingDetails = latestMatches.filter((match) => {
+        const status = String(match.status ?? '').toUpperCase();
+        const kickoffMs = Date.parse(match.utcDate);
+        return (
+          status === 'FINISHED' ||
+          LIVE_MATCH_STATUSES.has(status) ||
+          (!Number.isNaN(kickoffMs) && kickoffMs <= Date.now())
+        );
+      });
+      if (matchesNeedingDetails.length === 0) {
         setGroupMatches(latestMatches);
         return;
       }
 
       const detailedEntries = await Promise.all(
-        liveMatches.map(async (match) => {
-          const details = await loadMatchById(match.id);
-          return [match.id, details] as const;
+        matchesNeedingDetails.map(async (match) => {
+          try {
+            const details = await loadMatchById(
+              match.id,
+              toLocalDateInputValue(match.utcDate),
+              match.competition?.id
+            );
+            return [match.id, details] as const;
+          } catch {
+            return [match.id, null] as const;
+          }
         })
       );
       const detailsById = new Map<number, Match>();
@@ -4367,7 +4419,8 @@ function App() {
                 <section className="scoreboard">
                   <div className="scoreboard-head">
                     <strong>
-                      Today Matches - {selectedGroup.match_selection_mode === 'custom' ? 'Custom Matches' : selectedGroup.competition_name}
+                      Matches for {groupViewDate} -{' '}
+                      {selectedGroup.match_selection_mode === 'custom' ? 'Custom Matches' : selectedGroup.competition_name}
                     </strong>
                     <span>{groupMatchesLoading ? 'Loading...' : `${groupMatches.length} match(es)`}</span>
                   </div>
