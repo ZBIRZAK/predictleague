@@ -1021,20 +1021,6 @@ button:disabled {
   grid-column: 1 / -1;
 }
 
-.profile-push-control {
-  display: grid;
-  align-content: start;
-  gap: 0.42rem;
-}
-
-.profile-push-control > span {
-  font-weight: 700;
-}
-
-.profile-push-control .details-btn {
-  justify-self: start;
-}
-
 .group-list {
   display: grid;
   gap: 0.45rem;
@@ -2283,6 +2269,10 @@ button:disabled {
 
 .game-tour-intro-modal {
   width: min(520px, 100%);
+}
+
+.push-permission-modal {
+  width: min(480px, 100%);
 }
 
 .game-tour-intro-text {

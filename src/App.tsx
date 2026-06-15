@@ -22,7 +22,6 @@ import {
   loadInvitesForGroup,
   loadPredictionsForGroup,
   savePrediction,
-  sendTestPushNotification,
   sendSignupVerificationCode,
   updateGroupSettings,
   updateGroupCustomMatches,
@@ -214,6 +213,7 @@ type ThemeMode = 'light' | 'dark';
 type GameWorkspaceTab = 'play' | 'leaderboard' | 'settings';
 const SIGNUP_CODE_RESEND_SECONDS = 45;
 const GAME_TOUR_SEEN_KEY = 'predileague-game-tour-seen-v1';
+const PUSH_PROMPT_DISMISSED_KEY = 'predileague-push-prompt-dismissed';
 const GUIDE_DEMO_GROUP_ID = 'guide-demo-group-v1';
 const GUIDE_DEMO_MATCH_ID = 990001;
 const GUIDE_DEMO_USER_UID = 'guide-demo-user';
@@ -973,6 +973,7 @@ function App() {
   const [profileRecord, setProfileRecord] = useState<UserProfile | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileSaving, setProfileSaving] = useState(false);
+  const [profileLoadedUserUid, setProfileLoadedUserUid] = useState('');
   const [responsibleForm, setResponsibleForm] = useState<ResponsiblePlayForm>({
     remindersEnabled: true,
     reminderMinutesBefore: '20',
@@ -980,8 +981,8 @@ function App() {
     takeBreakUntil: ''
   });
   const [pushEnabling, setPushEnabling] = useState(false);
-  const [pushTesting, setPushTesting] = useState(false);
   const [reminderSaving, setReminderSaving] = useState(false);
+  const [showPushPermissionPrompt, setShowPushPermissionPrompt] = useState(false);
   const [pushPermission, setPushPermission] = useState<NotificationPermission | 'unsupported'>(() => {
     if (typeof Notification === 'undefined') return 'unsupported';
     return Notification.permission;
@@ -1416,6 +1417,19 @@ function App() {
   }, [pushPermission, user]);
 
   useEffect(() => {
+    if (
+      !user ||
+      profileLoadedUserUid !== user.uid ||
+      pushPermission !== 'default' ||
+      window.sessionStorage.getItem(PUSH_PROMPT_DISMISSED_KEY) === '1'
+    ) {
+      setShowPushPermissionPrompt(false);
+      return;
+    }
+    setShowPushPermissionPrompt(true);
+  }, [profileLoadedUserUid, pushPermission, user]);
+
+  useEffect(() => {
     const updateToday = () => setToday(getTodayLocalDateInputValue());
     const intervalId = window.setInterval(updateToday, 60_000);
     const onVisibilityChange = () => {
@@ -1531,6 +1545,8 @@ function App() {
       setGroups([]);
       setSelectedGroupId('');
       setProfileRecord(null);
+      setProfileLoadedUserUid('');
+      setShowPushPermissionPrompt(false);
       setShowGameTourPrompt(false);
       setGameTourActive(false);
       setProfileMenuOpen(false);
@@ -1919,6 +1935,7 @@ function App() {
       setError(err instanceof Error ? err.message : 'Failed to load profile.');
     } finally {
       setProfileLoading(false);
+      setProfileLoadedUserUid(currentUser.uid);
     }
   }
 
@@ -1995,6 +2012,8 @@ function App() {
         takeBreakUntil: fromLocalDateTimeInput(responsibleForm.takeBreakUntil)
       });
       setPushPermission('granted');
+      setShowPushPermissionPrompt(false);
+      window.sessionStorage.removeItem(PUSH_PROMPT_DISMISSED_KEY);
       setResponsibleForm((current) => ({
         ...current,
         remindersEnabled: true,
@@ -2005,6 +2024,9 @@ function App() {
       );
     } catch (err) {
       setPushPermission(typeof Notification === 'undefined' ? 'unsupported' : Notification.permission);
+      if (typeof Notification !== 'undefined' && Notification.permission === 'denied') {
+        setShowPushPermissionPrompt(false);
+      }
       setError(err instanceof Error ? err.message : 'Failed to enable push notifications.');
     } finally {
       setPushEnabling(false);
@@ -2039,17 +2061,9 @@ function App() {
     }
   }
 
-  async function handleTestPushNotification() {
-    try {
-      setPushTesting(true);
-      setError('');
-      await sendTestPushNotification();
-      setMessage('Test notification sent.');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to send test notification.');
-    } finally {
-      setPushTesting(false);
-    }
+  function handleDismissPushPermissionPrompt() {
+    window.sessionStorage.setItem(PUSH_PROMPT_DISMISSED_KEY, '1');
+    setShowPushPermissionPrompt(false);
   }
 
   async function bootstrapForUser(currentUser: User) {
@@ -5197,38 +5211,6 @@ function App() {
                       />
                       <small className="muted">{reminderSaving ? 'Saving...' : 'Saved automatically when you leave the field.'}</small>
                     </label>
-                    <div className="profile-push-control">
-                      <span>Push Notifications</span>
-                      <button
-                        type="button"
-                        className="details-btn"
-                        disabled={pushEnabling || pushPermission === 'unsupported'}
-                        onClick={() => void handleEnablePushNotifications()}
-                      >
-                        {pushEnabling
-                          ? 'Enabling...'
-                          : pushPermission === 'granted'
-                            ? 'Notifications Enabled'
-                            : 'Enable Push Notifications'}
-                      </button>
-                      {pushPermission === 'granted' ? (
-                        <button
-                          type="button"
-                          className="details-btn"
-                          disabled={pushTesting}
-                          onClick={() => void handleTestPushNotification()}
-                        >
-                          {pushTesting ? 'Sending...' : 'Send Test Notification'}
-                        </button>
-                      ) : null}
-                      <small className="muted">
-                        {pushPermission === 'denied'
-                          ? 'Notifications are blocked in your browser settings.'
-                          : pushPermission === 'unsupported'
-                            ? 'This browser does not support web push notifications.'
-                            : `Receive a reminder ${responsibleForm.reminderMinutesBefore || '20'} minutes before kickoff.`}
-                      </small>
-                    </div>
                     <label>
                       Weekly Summary
                       <select
@@ -5274,7 +5256,41 @@ function App() {
           </section>
         ) : null}
 
-        {showGameTourPrompt && page === 'game' && user ? (
+        {showPushPermissionPrompt && user ? (
+          <div className="modal-overlay" onClick={handleDismissPushPermissionPrompt}>
+            <section className="modal push-permission-modal" onClick={(event) => event.stopPropagation()}>
+              <header className="modal-header">
+                <h3>Enable Match Notifications</h3>
+                <button type="button" onClick={handleDismissPushPermissionPrompt}>
+                  Close
+                </button>
+              </header>
+              <p className="game-tour-intro-text">
+                Allow PrediLeague to remind you {responsibleForm.reminderMinutesBefore || '20'} minutes before kickoff.
+              </p>
+              <div className="auth-actions">
+                <button
+                  type="button"
+                  className="refresh"
+                  disabled={pushEnabling}
+                  onClick={() => void handleEnablePushNotifications()}
+                >
+                  {pushEnabling ? 'Enabling...' : 'Enable Notifications'}
+                </button>
+                <button
+                  type="button"
+                  className="details-btn"
+                  disabled={pushEnabling}
+                  onClick={handleDismissPushPermissionPrompt}
+                >
+                  Not now
+                </button>
+              </div>
+            </section>
+          </div>
+        ) : null}
+
+        {showGameTourPrompt && !showPushPermissionPrompt && page === 'game' && user ? (
           <div className="modal-overlay" onClick={handleDismissGameTourPrompt}>
             <section className="modal game-tour-intro-modal" onClick={(event) => event.stopPropagation()}>
               <header className="modal-header">
