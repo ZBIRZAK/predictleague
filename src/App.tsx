@@ -928,7 +928,7 @@ function PlayerPicksInput({
 }
 
 function App() {
-  const today = useMemo(() => getTodayLocalDateInputValue(), []);
+  const [today, setToday] = useState(() => getTodayLocalDateInputValue());
   const [page, setPage] = useState<AppPage>(() => getPageFromHash(window.location.hash));
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
     const saved = window.localStorage.getItem('predileague-theme');
@@ -1006,6 +1006,8 @@ function App() {
   const [myPredictions, setMyPredictions] = useState<Record<number, MatchPrediction>>({});
   const [groupPredictionsByMatch, setGroupPredictionsByMatch] = useState<Record<number, MatchPrediction[]>>({});
   const activeGroupDataKeyRef = useRef('');
+  const groupMatchRefreshIdRef = useRef(0);
+  const previousTodayRef = useRef(today);
   const [predictionDrafts, setPredictionDrafts] = useState<Record<number, PredictionDraft>>({});
   const [leaderboardScope, setLeaderboardScope] = useState<'total' | 'weekly'>('total');
   const [groupLeaderboardData, setGroupLeaderboardData] = useState<GroupLeaderboard | null>(null);
@@ -1387,6 +1389,28 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const updateToday = () => setToday(getTodayLocalDateInputValue());
+    const intervalId = window.setInterval(updateToday, 60_000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') updateToday();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    const previousToday = previousTodayRef.current;
+    if (previousToday === today) return;
+    setGroupViewDate((current) => (current === previousToday ? today : current));
+    setPublicDate((current) => (current === previousToday ? today : current));
+    setNewGroupCustomMatchDate((current) => (current === previousToday ? today : current));
+    previousTodayRef.current = today;
+  }, [today]);
+
+  useEffect(() => {
     if (authMode !== 'signup') {
       setSignupVerificationCode('');
       setSignupCodeSent(false);
@@ -1600,6 +1624,7 @@ function App() {
     if (!user) return;
     const requestKey = `${user.uid}:${selectedGroup.id}:${groupViewDate}`;
     activeGroupDataKeyRef.current = requestKey;
+    groupMatchRefreshIdRef.current += 1;
     setGroupPredictionsByMatch({});
     setMyPredictions({});
     void loadGroupData(user.uid, selectedGroup, groupViewDate, requestKey);
@@ -1631,6 +1656,8 @@ function App() {
       void refreshGroupMatchesOnly(selectedGroup, groupViewDate);
       void refreshGroupRealtimeData(selectedGroup, user.uid, leaderboardScope, groupViewDate);
     };
+
+    void refreshGroupMatchesOnly(selectedGroup, groupViewDate);
 
     const intervalId = window.setInterval(() => {
       tick();
@@ -2252,41 +2279,19 @@ function App() {
   }
 
   async function refreshGroupMatchesOnly(group: AppGroup, targetDate: string) {
+    const requestKey = `${user?.uid ?? ''}:${group.id}:${targetDate}`;
+    const refreshId = groupMatchRefreshIdRef.current + 1;
+    groupMatchRefreshIdRef.current = refreshId;
     try {
       const latestMatches = await loadMatchesForGroupSelection(group, targetDate);
-      const matchesNeedingDetails = latestMatches.filter((match) => {
-        const status = String(match.status ?? '').toUpperCase();
-        const kickoffMs = Date.parse(match.utcDate);
-        return (
-          status === 'FINISHED' ||
-          LIVE_MATCH_STATUSES.has(status) ||
-          (!Number.isNaN(kickoffMs) && kickoffMs <= Date.now())
-        );
-      });
-      if (matchesNeedingDetails.length === 0) {
-        setGroupMatches(latestMatches);
+      if (
+        activeGroupDataKeyRef.current !== requestKey ||
+        groupMatchRefreshIdRef.current !== refreshId
+      ) {
         return;
       }
-
-      const detailedEntries = await Promise.all(
-        matchesNeedingDetails.map(async (match) => {
-          try {
-            const details = await loadMatchById(
-              match.id,
-              toLocalDateInputValue(match.utcDate),
-              match.competition?.id
-            );
-            return [match.id, details] as const;
-          } catch {
-            return [match.id, null] as const;
-          }
-        })
-      );
-      const detailsById = new Map<number, Match>();
-      for (const [matchId, details] of detailedEntries) {
-        if (details) detailsById.set(matchId, details);
-      }
-      setGroupMatches(latestMatches.map((match) => detailsById.get(match.id) ?? match));
+      setGroupMatches(latestMatches);
+      void enrichGroupMatchResults(latestMatches, requestKey);
     } catch {
       // Ignore background refresh failures and keep current UI state.
     }
