@@ -3078,6 +3078,38 @@ app.get('/internal/db/profile', requireFirebaseAuth, async (req: AuthedRequest, 
   }
 });
 
+app.patch('/internal/db/profile/reminders', requireFirebaseAuth, async (req: AuthedRequest, res) => {
+  const admin = requireSupabaseAdmin(res);
+  if (!admin) return;
+  const userUid = req.auth?.uid ?? '';
+  const remindersEnabled = req.body?.remindersEnabled;
+  const reminderMinutesBefore = Number(req.body?.reminderMinutesBefore);
+  if (
+    typeof remindersEnabled !== 'boolean' ||
+    !Number.isFinite(reminderMinutesBefore) ||
+    reminderMinutesBefore < 5 ||
+    reminderMinutesBefore > 180
+  ) {
+    res.status(400).json({ error: 'Reminder minutes must be between 5 and 180.' });
+    return;
+  }
+
+  try {
+    const { error } = await admin
+      .from('user_profiles')
+      .update({
+        reminders_enabled: remindersEnabled,
+        reminder_minutes_before: Math.floor(reminderMinutesBefore),
+        updated_at: new Date().toISOString()
+      })
+      .eq('user_uid', userUid);
+    if (error) throw new Error(error.message);
+    res.status(200).json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to save reminder settings.' });
+  }
+});
+
 app.put('/internal/db/profile', requireFirebaseAuth, async (req: AuthedRequest, res) => {
   const admin = requireSupabaseAdmin(res);
   if (!admin) return;

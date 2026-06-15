@@ -26,6 +26,7 @@ import {
   sendSignupVerificationCode,
   updateGroupSettings,
   updateGroupCustomMatches,
+  updateReminderSettings,
   upsertUserProfile,
   upsertGroupBonusMatches,
   verifySignupVerificationCode,
@@ -980,6 +981,7 @@ function App() {
   });
   const [pushEnabling, setPushEnabling] = useState(false);
   const [pushTesting, setPushTesting] = useState(false);
+  const [reminderSaving, setReminderSaving] = useState(false);
   const [pushPermission, setPushPermission] = useState<NotificationPermission | 'unsupported'>(() => {
     if (typeof Notification === 'undefined') return 'unsupported';
     return Notification.permission;
@@ -2006,6 +2008,34 @@ function App() {
       setError(err instanceof Error ? err.message : 'Failed to enable push notifications.');
     } finally {
       setPushEnabling(false);
+    }
+  }
+
+  async function saveReminderSettings(remindersEnabled: boolean, value: string) {
+    const reminderMinutes = Number(value);
+    if (Number.isNaN(reminderMinutes) || reminderMinutes < 5 || reminderMinutes > 180) {
+      setError('Reminder minutes must be between 5 and 180.');
+      return;
+    }
+
+    try {
+      setReminderSaving(true);
+      setError('');
+      const normalizedReminderMinutes = Math.floor(reminderMinutes);
+      await updateReminderSettings({
+        remindersEnabled,
+        reminderMinutesBefore: normalizedReminderMinutes
+      });
+      setResponsibleForm((current) => ({
+        ...current,
+        remindersEnabled,
+        reminderMinutesBefore: String(normalizedReminderMinutes)
+      }));
+      setMessage(`Reminder saved: ${normalizedReminderMinutes} minutes before kickoff.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save reminder settings.');
+    } finally {
+      setReminderSaving(false);
     }
   }
 
@@ -5139,9 +5169,12 @@ function App() {
                       Match Reminders
                       <select
                         value={responsibleForm.remindersEnabled ? 'on' : 'off'}
-                        onChange={(e) =>
-                          setResponsibleForm((prev) => ({ ...prev, remindersEnabled: e.target.value === 'on' }))
-                        }
+                        disabled={reminderSaving}
+                        onChange={(e) => {
+                          const remindersEnabled = e.target.value === 'on';
+                          setResponsibleForm((prev) => ({ ...prev, remindersEnabled }));
+                          void saveReminderSettings(remindersEnabled, responsibleForm.reminderMinutesBefore);
+                        }}
                       >
                         <option value="on">On</option>
                         <option value="off">Off</option>
@@ -5153,11 +5186,16 @@ function App() {
                         type="number"
                         min={5}
                         max={180}
+                        disabled={reminderSaving}
                         value={responsibleForm.reminderMinutesBefore}
                         onChange={(e) =>
                           setResponsibleForm((prev) => ({ ...prev, reminderMinutesBefore: e.target.value }))
                         }
+                        onBlur={(e) =>
+                          void saveReminderSettings(responsibleForm.remindersEnabled, e.currentTarget.value)
+                        }
                       />
+                      <small className="muted">{reminderSaving ? 'Saving...' : 'Saved automatically when you leave the field.'}</small>
                     </label>
                     <div className="profile-push-control">
                       <span>Push Notifications</span>

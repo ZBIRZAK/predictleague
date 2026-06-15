@@ -329,6 +329,16 @@ export async function registerPushSubscription(token: string) {
   });
 }
 
+export async function updateReminderSettings(input: {
+  remindersEnabled: boolean;
+  reminderMinutesBefore: number;
+}) {
+  await authedFetch('/internal/db/profile/reminders', {
+    method: 'PATCH',
+    body: JSON.stringify(input)
+  });
+}
+
 export async function sendTestPushNotification() {
   await authedFetch('/internal/db/push-subscriptions/test', {
     method: 'POST'
