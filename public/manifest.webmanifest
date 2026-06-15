@@ -1,0 +1,16 @@
+{
+  "name": "PrediLeague",
+  "short_name": "PrediLeague",
+  "start_url": "/#game",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/brand-mark.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

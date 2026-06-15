@@ -114,7 +114,7 @@ create table if not exists public.user_profiles (
   favorite_team text,
   bio text,
   reminders_enabled boolean not null default true,
-  reminder_minutes_before integer not null default 30 check (reminder_minutes_before >= 5 and reminder_minutes_before <= 180),
+  reminder_minutes_before integer not null default 20 check (reminder_minutes_before >= 5 and reminder_minutes_before <= 180),
   weekly_summary_enabled boolean not null default true,
   take_break_until timestamptz,
   subscription_tier text not null default 'free' check (subscription_tier in ('free', 'pro')),
@@ -123,6 +123,26 @@ create table if not exists public.user_profiles (
   pro_expires_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
+);
+
+create table if not exists public.push_subscriptions (
+  id uuid primary key default gen_random_uuid(),
+  user_uid text not null references public.user_profiles(user_uid) on delete cascade,
+  token text not null unique,
+  platform text not null default 'web',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists idx_push_subscriptions_user_uid on public.push_subscriptions(user_uid);
+
+create table if not exists public.match_reminder_deliveries (
+  id uuid primary key default gen_random_uuid(),
+  user_uid text not null references public.user_profiles(user_uid) on delete cascade,
+  match_id integer not null,
+  reminder_minutes integer not null,
+  sent_at timestamptz not null default now(),
+  unique (user_uid, match_id, reminder_minutes)
 );
 
 -- Compatibility upgrades for existing databases:
@@ -172,12 +192,12 @@ alter table public.user_profiles add column if not exists subscription_status te
 alter table public.user_profiles add column if not exists paypal_subscription_id text;
 alter table public.user_profiles add column if not exists pro_expires_at timestamptz;
 update public.user_profiles set reminders_enabled = true where reminders_enabled is null;
-update public.user_profiles set reminder_minutes_before = 30 where reminder_minutes_before is null;
+update public.user_profiles set reminder_minutes_before = 20 where reminder_minutes_before is null;
 update public.user_profiles set weekly_summary_enabled = true where weekly_summary_enabled is null;
 update public.user_profiles set subscription_tier = 'free' where subscription_tier is null;
 update public.user_profiles set subscription_status = 'inactive' where subscription_status is null;
 alter table public.user_profiles alter column reminders_enabled set default true;
-alter table public.user_profiles alter column reminder_minutes_before set default 30;
+alter table public.user_profiles alter column reminder_minutes_before set default 20;
 alter table public.user_profiles alter column weekly_summary_enabled set default true;
 alter table public.user_profiles alter column subscription_tier set default 'free';
 alter table public.user_profiles alter column subscription_status set default 'inactive';
@@ -195,6 +215,8 @@ alter table public.user_profiles enable row level security;
 alter table public.group_match_bonus enable row level security;
 alter table public.group_custom_matches enable row level security;
 alter table public.prediction_points_snapshots enable row level security;
+alter table public.push_subscriptions enable row level security;
+alter table public.match_reminder_deliveries enable row level security;
 
 create or replace function public.block_locked_prediction_updates()
 returns trigger
@@ -290,3 +312,15 @@ drop policy if exists "prediction_points_snapshots_block_update" on public.predi
 create policy "prediction_points_snapshots_block_select" on public.prediction_points_snapshots for select using (false);
 create policy "prediction_points_snapshots_block_insert" on public.prediction_points_snapshots for insert with check (false);
 create policy "prediction_points_snapshots_block_update" on public.prediction_points_snapshots for update using (false) with check (false);
+
+drop policy if exists "push_subscriptions_block_select" on public.push_subscriptions;
+drop policy if exists "push_subscriptions_block_insert" on public.push_subscriptions;
+drop policy if exists "push_subscriptions_block_update" on public.push_subscriptions;
+create policy "push_subscriptions_block_select" on public.push_subscriptions for select using (false);
+create policy "push_subscriptions_block_insert" on public.push_subscriptions for insert with check (false);
+create policy "push_subscriptions_block_update" on public.push_subscriptions for update using (false) with check (false);
+
+drop policy if exists "match_reminder_deliveries_block_select" on public.match_reminder_deliveries;
+drop policy if exists "match_reminder_deliveries_block_insert" on public.match_reminder_deliveries;
+create policy "match_reminder_deliveries_block_select" on public.match_reminder_deliveries for select using (false);
+create policy "match_reminder_deliveries_block_insert" on public.match_reminder_deliveries for insert with check (false);

@@ -322,6 +322,19 @@ export async function upsertUserProfile(input: {
   });
 }
 
+export async function registerPushSubscription(token: string) {
+  await authedFetch('/internal/db/push-subscriptions', {
+    method: 'POST',
+    body: JSON.stringify({ token, platform: 'web' })
+  });
+}
+
+export async function sendTestPushNotification() {
+  await authedFetch('/internal/db/push-subscriptions/test', {
+    method: 'POST'
+  });
+}
+
 export async function updateGroupSettings(params: {
   groupId: string;
   predictionLockMinutes: number;

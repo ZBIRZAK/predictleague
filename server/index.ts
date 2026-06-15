@@ -1,4 +1,5 @@
 import express from 'express';
+import { createSign } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,6 +32,33 @@ const supabaseUrl = process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ??
 const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
 const footballDataApiKey = process.env.FOOTBALL_DATA_API_KEY ?? '';
 const footballDataApiBase = 'https://api.football-data.org';
+const cronSecret = process.env.CRON_SECRET ?? '';
+const appBaseUrl = (process.env.APP_BASE_URL ?? 'https://predileague.com').replace(/\/+$/, '');
+const firebaseServiceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON ?? '';
+const firebaseServiceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_JSON_BASE64 ?? '';
+
+type FirebaseServiceAccount = {
+  project_id?: string;
+  client_email?: string;
+  private_key?: string;
+};
+
+function parseFirebaseServiceAccount(): FirebaseServiceAccount | null {
+  const raw = firebaseServiceAccountJson || (
+    firebaseServiceAccountBase64
+      ? Buffer.from(firebaseServiceAccountBase64, 'base64').toString('utf8')
+      : ''
+  );
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as FirebaseServiceAccount;
+  } catch {
+    return null;
+  }
+}
+
+const firebaseServiceAccount = parseFirebaseServiceAccount();
+let firebaseAccessTokenCache: { token: string; expiresAt: number } | null = null;
 
 const mailer =
   smtpUser && smtpPass
@@ -180,6 +208,106 @@ async function requireFirebaseAuth(req: AuthedRequest, res: express.Response, ne
 
   req.auth = auth;
   next();
+}
+
+function toBase64Url(value: string | Buffer) {
+  return Buffer.from(value).toString('base64url');
+}
+
+async function getFirebaseAccessToken() {
+  if (firebaseAccessTokenCache && firebaseAccessTokenCache.expiresAt > Date.now() + 60_000) {
+    return firebaseAccessTokenCache.token;
+  }
+
+  const clientEmail = firebaseServiceAccount?.client_email;
+  const privateKey = firebaseServiceAccount?.private_key?.replace(/\\n/g, '\n');
+  if (!clientEmail || !privateKey) {
+    throw new Error('FIREBASE_SERVICE_ACCOUNT_JSON is missing or invalid.');
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const header = toBase64Url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
+  const claims = toBase64Url(
+    JSON.stringify({
+      iss: clientEmail,
+      scope: 'https://www.googleapis.com/auth/firebase.messaging',
+      aud: 'https://oauth2.googleapis.com/token',
+      iat: now,
+      exp: now + 3600
+    })
+  );
+  const unsignedToken = `${header}.${claims}`;
+  const signer = createSign('RSA-SHA256');
+  signer.update(unsignedToken);
+  signer.end();
+  const assertion = `${unsignedToken}.${signer.sign(privateKey).toString('base64url')}`;
+
+  const response = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion
+    })
+  });
+  const payload = (await response.json().catch(() => ({}))) as {
+    access_token?: string;
+    expires_in?: number;
+    error_description?: string;
+  };
+  if (!response.ok || !payload.access_token) {
+    throw new Error(payload.error_description ?? `Firebase OAuth failed (${response.status}).`);
+  }
+
+  firebaseAccessTokenCache = {
+    token: payload.access_token,
+    expiresAt: Date.now() + Math.max(300, Number(payload.expires_in ?? 3600)) * 1000
+  };
+  return payload.access_token;
+}
+
+async function sendFirebasePush(params: {
+  token: string;
+  title: string;
+  body: string;
+  link: string;
+}) {
+  const projectId = firebaseServiceAccount?.project_id;
+  if (!projectId) {
+    throw new Error('Firebase service account project_id is missing.');
+  }
+  const accessToken = await getFirebaseAccessToken();
+  const response = await fetch(`https://fcm.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/messages:send`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      message: {
+        token: params.token,
+        data: {
+          title: params.title,
+          body: params.body,
+          link: params.link
+        },
+        webpush: {
+          headers: { Urgency: 'high' },
+          fcm_options: { link: params.link }
+        }
+      }
+    })
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as {
+      error?: { message?: string; status?: string };
+    };
+    const error = new Error(payload.error?.message ?? `Firebase send failed (${response.status}).`) as Error & {
+      status?: string;
+    };
+    error.status = payload.error?.status;
+    throw error;
+  }
 }
 
 function hitInviteRateLimit(ip: string) {
@@ -2640,6 +2768,292 @@ app.post('/internal/db/predictions', requireFirebaseAuth, async (req: AuthedRequ
     res.status(200).json({ ok: true });
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to save prediction.' });
+  }
+});
+
+app.post('/internal/db/push-subscriptions', requireFirebaseAuth, async (req: AuthedRequest, res) => {
+  const admin = requireSupabaseAdmin(res);
+  if (!admin) return;
+  const userUid = req.auth?.uid ?? '';
+  const token = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+  const platform = typeof req.body?.platform === 'string' ? req.body.platform.trim().slice(0, 30) : 'web';
+  if (!token || token.length > 4096) {
+    res.status(400).json({ error: 'Invalid push notification token.' });
+    return;
+  }
+
+  try {
+    const { error } = await admin.from('push_subscriptions').upsert(
+      {
+        user_uid: userUid,
+        token,
+        platform: platform || 'web',
+        updated_at: new Date().toISOString()
+      },
+      { onConflict: 'token' }
+    );
+    if (error) throw new Error(error.message);
+    res.status(200).json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to save push subscription.' });
+  }
+});
+
+app.post('/internal/db/push-subscriptions/test', requireFirebaseAuth, async (req: AuthedRequest, res) => {
+  const admin = requireSupabaseAdmin(res);
+  if (!admin) return;
+  if (!firebaseServiceAccount) {
+    res.status(503).json({ error: 'Firebase service account is not configured.' });
+    return;
+  }
+
+  try {
+    const userUid = req.auth?.uid ?? '';
+    const { data, error } = await admin.from('push_subscriptions').select('id,token').eq('user_uid', userUid);
+    if (error) throw new Error(error.message);
+    if (!data?.length) {
+      res.status(404).json({ error: 'Enable push notifications on this device first.' });
+      return;
+    }
+
+    let sent = 0;
+    for (const subscription of data) {
+      try {
+        await sendFirebasePush({
+          token: String(subscription.token),
+          title: 'PrediLeague notifications are ready',
+          body: 'You will receive match reminders 20 minutes before kickoff.',
+          link: `${appBaseUrl}/#game`
+        });
+        sent += 1;
+      } catch (sendError) {
+        const status = (sendError as Error & { status?: string }).status;
+        if (status === 'NOT_FOUND' || status === 'UNREGISTERED') {
+          await admin.from('push_subscriptions').delete().eq('id', subscription.id);
+        }
+      }
+    }
+    if (sent === 0) {
+      res.status(502).json({ error: 'Firebase could not deliver the test notification.' });
+      return;
+    }
+    res.status(200).json({ ok: true, sent });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to send test notification.' });
+  }
+});
+
+app.post('/internal/cron/push-reminders', async (req, res) => {
+  if (!cronSecret || req.headers.authorization !== `Bearer ${cronSecret}`) {
+    res.status(401).json({ error: 'Invalid cron authorization.' });
+    return;
+  }
+  const admin = requireSupabaseAdmin(res);
+  if (!admin) return;
+  if (!firebaseServiceAccount) {
+    res.status(503).json({ error: 'Firebase service account is not configured.' });
+    return;
+  }
+
+  try {
+    const now = new Date();
+    const fromDate = new Date(now.getTime() - 24 * 60 * 60_000).toISOString().slice(0, 10);
+    const toDate = new Date(now.getTime() + 24 * 60 * 60_000).toISOString().slice(0, 10);
+
+    const [{ data: profiles, error: profileError }, { data: subscriptions, error: subscriptionError }] =
+      await Promise.all([
+        admin
+          .from('user_profiles')
+          .select('user_uid,reminders_enabled,reminder_minutes_before,take_break_until')
+          .eq('reminders_enabled', true),
+        admin.from('push_subscriptions').select('id,user_uid,token')
+      ]);
+    if (profileError) throw new Error(profileError.message);
+    if (subscriptionError) throw new Error(subscriptionError.message);
+
+    const subscribedUserIds = new Set((subscriptions ?? []).map((row) => String(row.user_uid)));
+    const activeProfiles = (profiles ?? []).filter((row) => {
+      if (!subscribedUserIds.has(String(row.user_uid))) return false;
+      if (!row.take_break_until) return true;
+      return Date.parse(String(row.take_break_until)) <= now.getTime();
+    });
+    const activeUserIds = activeProfiles.map((row) => String(row.user_uid));
+    if (activeUserIds.length === 0) {
+      res.status(200).json({ checked: 0, sent: 0 });
+      return;
+    }
+
+    const { data: memberships, error: membershipError } = await admin
+      .from('group_members')
+      .select('group_id,user_uid')
+      .in('user_uid', activeUserIds);
+    if (membershipError) throw new Error(membershipError.message);
+    const groupIds = Array.from(new Set((memberships ?? []).map((row) => String(row.group_id))));
+    if (groupIds.length === 0) {
+      res.status(200).json({ checked: activeProfiles.length, sent: 0 });
+      return;
+    }
+
+    const { data: groups, error: groupError } = await admin
+      .from('groups')
+      .select('id,competition_id,match_selection_mode')
+      .in('id', groupIds);
+    if (groupError) throw new Error(groupError.message);
+
+    const customGroupIds = (groups ?? [])
+      .filter((group) => group.match_selection_mode === 'custom')
+      .map((group) => String(group.id));
+    const customMatchesQuery =
+      customGroupIds.length > 0
+        ? await admin
+            .from('group_custom_matches')
+            .select('group_id,match_id')
+            .in('group_id', customGroupIds)
+            .gte('match_date', fromDate)
+            .lte('match_date', toDate)
+        : { data: [], error: null };
+    if (customMatchesQuery.error) throw new Error(customMatchesQuery.error.message);
+
+    const matchRows: Array<Record<string, unknown>> = [];
+    const competitionIds = Array.from(
+      new Set(
+        (groups ?? [])
+          .filter((group) => group.match_selection_mode !== 'custom')
+          .map((group) => Number(group.competition_id))
+          .filter(Number.isFinite)
+      )
+    );
+    const leagueKeys = Array.from(
+      new Set(
+        competitionIds
+          .map((competitionId) => getEspnLeagueByFootballCompetitionId(competitionId))
+          .filter((league): league is string => Boolean(league))
+      )
+    );
+    const leagueResults = await Promise.all(
+      leagueKeys.map((league) => fetchEspnLeagueMatchesInRange(league, fromDate, toDate))
+    );
+    for (const rows of leagueResults) matchRows.push(...rows);
+    if (customGroupIds.length > 0) {
+      matchRows.push(...(await fetchEspnMatchesInRange(fromDate, toDate)));
+    }
+
+    const matchesById = new Map<number, MatchApi>();
+    for (const row of matchRows) {
+      const match = row as unknown as MatchApi;
+      const matchId = Number(match.id ?? 0);
+      if (matchId && !matchesById.has(matchId)) matchesById.set(matchId, match);
+    }
+    const upcomingMatches = Array.from(matchesById.values()).filter((match) => {
+      const kickoff = Date.parse(match.utcDate ?? '');
+      return (
+        ['TIMED', 'SCHEDULED'].includes(match.status ?? '') &&
+        Number.isFinite(kickoff) &&
+        kickoff > now.getTime() &&
+        kickoff <= now.getTime() + 181 * 60_000
+      );
+    });
+    if (upcomingMatches.length === 0) {
+      res.status(200).json({ checked: activeProfiles.length, sent: 0 });
+      return;
+    }
+
+    const upcomingMatchIds = upcomingMatches.map((match) => Number(match.id));
+    const { data: predictions, error: predictionError } = await admin
+      .from('predictions')
+      .select('group_id,match_id,user_uid')
+      .in('user_uid', activeUserIds)
+      .in('match_id', upcomingMatchIds);
+    if (predictionError) throw new Error(predictionError.message);
+
+    const predictionsSet = new Set(
+      (predictions ?? []).map((row) => `${row.user_uid}:${row.group_id}:${row.match_id}`)
+    );
+    const subscriptionsByUser = new Map<string, Array<{ id: string; token: string }>>();
+    for (const row of subscriptions ?? []) {
+      const userUid = String(row.user_uid);
+      const list = subscriptionsByUser.get(userUid) ?? [];
+      list.push({ id: String(row.id), token: String(row.token) });
+      subscriptionsByUser.set(userUid, list);
+    }
+    const groupById = new Map((groups ?? []).map((group) => [String(group.id), group]));
+    const groupIdsByUser = new Map<string, string[]>();
+    for (const membership of memberships ?? []) {
+      const userUid = String(membership.user_uid);
+      const list = groupIdsByUser.get(userUid) ?? [];
+      list.push(String(membership.group_id));
+      groupIdsByUser.set(userUid, list);
+    }
+    const customMatchSet = new Set(
+      (customMatchesQuery.data ?? []).map((row) => `${row.group_id}:${row.match_id}`)
+    );
+
+    let sent = 0;
+    for (const profile of activeProfiles) {
+      const userUid = String(profile.user_uid);
+      const reminderMinutes = Math.max(5, Math.min(180, Number(profile.reminder_minutes_before ?? 20)));
+      for (const match of upcomingMatches) {
+        const matchId = Number(match.id);
+        const kickoff = Date.parse(match.utcDate ?? '');
+        const minutesUntil = (kickoff - now.getTime()) / 60_000;
+        if (minutesUntil > reminderMinutes || minutesUntil <= reminderMinutes - 2) continue;
+
+        const relevantGroupIds = (groupIdsByUser.get(userUid) ?? []).filter((groupId) => {
+          const group = groupById.get(groupId);
+          if (!group) return false;
+          if (group.match_selection_mode === 'custom') {
+            return customMatchSet.has(`${groupId}:${matchId}`);
+          }
+          return Number(group.competition_id) === Number(match.competition?.id);
+        });
+        const missingGroupIds = relevantGroupIds.filter(
+          (groupId) => !predictionsSet.has(`${userUid}:${groupId}:${matchId}`)
+        );
+        if (missingGroupIds.length === 0) continue;
+
+        const { error: deliveryError } = await admin.from('match_reminder_deliveries').insert({
+          user_uid: userUid,
+          match_id: matchId,
+          reminder_minutes: reminderMinutes
+        });
+        if (deliveryError?.code === '23505') continue;
+        if (deliveryError) throw new Error(deliveryError.message);
+
+        const homeName = match.homeTeam?.shortName ?? match.homeTeam?.name ?? 'Home team';
+        const awayName = match.awayTeam?.shortName ?? match.awayTeam?.name ?? 'Away team';
+        let successfulTokens = 0;
+        for (const subscription of subscriptionsByUser.get(userUid) ?? []) {
+          try {
+            await sendFirebasePush({
+              token: subscription.token,
+              title: `${homeName} vs ${awayName} starts in ${Math.round(minutesUntil)} min`,
+              body: `Your prediction is missing in ${missingGroupIds.length} group${missingGroupIds.length === 1 ? '' : 's'}.`,
+              link: `${appBaseUrl}/#game`
+            });
+            successfulTokens += 1;
+          } catch (error) {
+            const status = (error as Error & { status?: string }).status;
+            if (status === 'NOT_FOUND' || status === 'UNREGISTERED') {
+              await admin.from('push_subscriptions').delete().eq('id', subscription.id);
+            }
+          }
+        }
+        if (successfulTokens > 0) {
+          sent += 1;
+        } else {
+          await admin
+            .from('match_reminder_deliveries')
+            .delete()
+            .eq('user_uid', userUid)
+            .eq('match_id', matchId)
+            .eq('reminder_minutes', reminderMinutes);
+        }
+      }
+    }
+
+    res.status(200).json({ checked: activeProfiles.length, matches: upcomingMatches.length, sent });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to send match reminders.' });
   }
 });
 

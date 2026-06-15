@@ -22,6 +22,7 @@ import {
   loadInvitesForGroup,
   loadPredictionsForGroup,
   savePrediction,
+  sendTestPushNotification,
   sendSignupVerificationCode,
   updateGroupSettings,
   updateGroupCustomMatches,
@@ -38,6 +39,11 @@ import {
   type UserProfile
 } from './lib/db';
 import { firebaseAuth } from './lib/firebase';
+import {
+  enablePushNotifications,
+  listenForForegroundPush,
+  syncPushSubscriptionIfAllowed
+} from './lib/push-notifications';
 import {
   filterMatches,
   getStatusClass,
@@ -703,7 +709,7 @@ function fromLocalDateTimeInput(value: string) {
 function profileToResponsibleForm(profile: UserProfile | null): ResponsiblePlayForm {
   return {
     remindersEnabled: profile?.reminders_enabled ?? true,
-    reminderMinutesBefore: String(profile?.reminder_minutes_before ?? 30),
+    reminderMinutesBefore: String(profile?.reminder_minutes_before ?? 20),
     weeklySummaryEnabled: profile?.weekly_summary_enabled ?? true,
     takeBreakUntil: toLocalDateTimeInput(profile?.take_break_until)
   };
@@ -968,9 +974,15 @@ function App() {
   const [profileSaving, setProfileSaving] = useState(false);
   const [responsibleForm, setResponsibleForm] = useState<ResponsiblePlayForm>({
     remindersEnabled: true,
-    reminderMinutesBefore: '30',
+    reminderMinutesBefore: '20',
     weeklySummaryEnabled: true,
     takeBreakUntil: ''
+  });
+  const [pushEnabling, setPushEnabling] = useState(false);
+  const [pushTesting, setPushTesting] = useState(false);
+  const [pushPermission, setPushPermission] = useState<NotificationPermission | 'unsupported'>(() => {
+    if (typeof Notification === 'undefined') return 'unsupported';
+    return Notification.permission;
   });
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
@@ -1387,6 +1399,19 @@ function App() {
       setAuthReady(true);
     });
   }, []);
+
+  useEffect(() => {
+    let unsubscribe: () => void = () => undefined;
+    void listenForForegroundPush().then((cleanup) => {
+      unsubscribe = cleanup;
+    });
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user || pushPermission !== 'granted') return;
+    void syncPushSubscriptionIfAllowed().catch(() => undefined);
+  }, [pushPermission, user]);
 
   useEffect(() => {
     const updateToday = () => setToday(getTodayLocalDateInputValue());
@@ -1934,6 +1959,58 @@ function App() {
       setError(err instanceof Error ? err.message : 'Failed to save profile.');
     } finally {
       setProfileSaving(false);
+    }
+  }
+
+  async function handleEnablePushNotifications() {
+    if (!user) {
+      setError('You need to be logged in to enable notifications.');
+      return;
+    }
+
+    try {
+      setPushEnabling(true);
+      setError('');
+      await enablePushNotifications();
+      await upsertUserProfile({
+        userUid: user.uid,
+        email: user.email ?? email,
+        firstName: profileForm.firstName,
+        lastName: profileForm.lastName,
+        displayName: profileForm.displayName,
+        country: profileForm.country,
+        favoriteTeam: profileForm.favoriteTeam,
+        bio: profileForm.bio,
+        remindersEnabled: true,
+        reminderMinutesBefore: 20,
+        weeklySummaryEnabled: responsibleForm.weeklySummaryEnabled,
+        takeBreakUntil: fromLocalDateTimeInput(responsibleForm.takeBreakUntil)
+      });
+      setPushPermission('granted');
+      setResponsibleForm((current) => ({
+        ...current,
+        remindersEnabled: true,
+        reminderMinutesBefore: '20'
+      }));
+      setMessage('Push notifications enabled. Match reminders are set for 20 minutes before kickoff.');
+    } catch (err) {
+      setPushPermission(typeof Notification === 'undefined' ? 'unsupported' : Notification.permission);
+      setError(err instanceof Error ? err.message : 'Failed to enable push notifications.');
+    } finally {
+      setPushEnabling(false);
+    }
+  }
+
+  async function handleTestPushNotification() {
+    try {
+      setPushTesting(true);
+      setError('');
+      await sendTestPushNotification();
+      setMessage('Test notification sent.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to send test notification.');
+    } finally {
+      setPushTesting(false);
     }
   }
 
@@ -5074,6 +5151,38 @@ function App() {
                         }
                       />
                     </label>
+                    <div className="profile-push-control">
+                      <span>Push Notifications</span>
+                      <button
+                        type="button"
+                        className="details-btn"
+                        disabled={pushEnabling || pushPermission === 'unsupported'}
+                        onClick={() => void handleEnablePushNotifications()}
+                      >
+                        {pushEnabling
+                          ? 'Enabling...'
+                          : pushPermission === 'granted'
+                            ? 'Notifications Enabled'
+                            : 'Enable Push Notifications'}
+                      </button>
+                      {pushPermission === 'granted' ? (
+                        <button
+                          type="button"
+                          className="details-btn"
+                          disabled={pushTesting}
+                          onClick={() => void handleTestPushNotification()}
+                        >
+                          {pushTesting ? 'Sending...' : 'Send Test Notification'}
+                        </button>
+                      ) : null}
+                      <small className="muted">
+                        {pushPermission === 'denied'
+                          ? 'Notifications are blocked in your browser settings.'
+                          : pushPermission === 'unsupported'
+                            ? 'This browser does not support web push notifications.'
+                            : 'Receive a reminder 20 minutes before kickoff.'}
+                      </small>
+                    </div>
                     <label>
                       Weekly Summary
                       <select
