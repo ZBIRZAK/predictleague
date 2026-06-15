@@ -4,23 +4,49 @@ import { firebaseApp } from './firebase';
 
 const vapidKey = import.meta.env.VITE_FIREBASE_VAPID_KEY ?? '';
 
-function serviceWorkerUrl() {
-  const params = new URLSearchParams({
-    apiKey: import.meta.env.VITE_FIREBASE_API_KEY ?? '',
-    authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN ?? '',
-    projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID ?? '',
-    storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET ?? '',
-    messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID ?? '',
-    appId: import.meta.env.VITE_FIREBASE_APP_ID ?? ''
-  });
-  return `/firebase-messaging-sw.js?${params.toString()}`;
-}
-
 async function getRegistration() {
   if (!('serviceWorker' in navigator)) {
     throw new Error('Push notifications are not supported by this browser.');
   }
-  return navigator.serviceWorker.register(serviceWorkerUrl(), { scope: '/' });
+  const registration = await navigator.serviceWorker.register('/firebase-messaging-sw.js', {
+    scope: '/',
+    updateViaCache: 'none'
+  });
+  await registration.update();
+  return navigator.serviceWorker.ready;
+}
+
+function pushRegistrationMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.toLowerCase().includes('push service error')) {
+    return 'The browser push service could not register this device. Reload the app and try again. If it still fails, allow notifications and service workers for this site in the browser settings.';
+  }
+  return message || 'Failed to register this device for push notifications.';
+}
+
+async function getFirebaseToken(registration: ServiceWorkerRegistration) {
+  const messaging = getMessaging(firebaseApp);
+  try {
+    return await getToken(messaging, {
+      vapidKey,
+      serviceWorkerRegistration: registration
+    });
+  } catch (firstError) {
+    const existingSubscription = await registration.pushManager.getSubscription().catch(() => null);
+    if (!existingSubscription) {
+      throw new Error(pushRegistrationMessage(firstError));
+    }
+
+    await existingSubscription.unsubscribe().catch(() => false);
+    try {
+      return await getToken(messaging, {
+        vapidKey,
+        serviceWorkerRegistration: registration
+      });
+    } catch (retryError) {
+      throw new Error(pushRegistrationMessage(retryError));
+    }
+  }
 }
 
 export async function enablePushNotifications() {
@@ -37,10 +63,7 @@ export async function enablePushNotifications() {
   }
 
   const registration = await getRegistration();
-  const token = await getToken(getMessaging(firebaseApp), {
-    vapidKey,
-    serviceWorkerRegistration: registration
-  });
+  const token = await getFirebaseToken(registration);
   if (!token) {
     throw new Error('Firebase did not return a notification token.');
   }

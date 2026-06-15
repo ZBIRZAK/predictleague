@@ -1,24 +1,34 @@
-/* global firebase, clients */
-importScripts('https://www.gstatic.com/firebasejs/12.10.0/firebase-app-compat.js');
-importScripts('https://www.gstatic.com/firebasejs/12.10.0/firebase-messaging-compat.js');
-
-const params = new URL(self.location.href).searchParams;
-firebase.initializeApp({
-  apiKey: params.get('apiKey'),
-  authDomain: params.get('authDomain'),
-  projectId: params.get('projectId'),
-  storageBucket: params.get('storageBucket'),
-  messagingSenderId: params.get('messagingSenderId'),
-  appId: params.get('appId')
+/* global clients */
+self.addEventListener('push', (event) => {
+  const payload = event.data?.json() || {};
+  const data = payload.data || payload.notification || {};
+  event.waitUntil(
+    self.registration.showNotification(data.title || 'PrediLeague', {
+      body: data.body || '',
+      icon: '/brand-mark.svg',
+      badge: '/brand-mark.svg',
+      data: { link: data.link || '/#game' }
+    })
+  );
 });
 
-firebase.messaging().onBackgroundMessage((payload) => {
-  self.registration.showNotification(payload.data?.title || 'PrediLeague', {
-    body: payload.data?.body || '',
-    icon: '/brand-mark.svg',
-    badge: '/brand-mark.svg',
-    data: { link: payload.data?.link || '/#game' }
-  });
+self.addEventListener('install', () => {
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(self.clients.claim());
+});
+
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil(
+    self.registration.showNotification('PrediLeague', {
+      body: 'Open PrediLeague to renew match notifications.',
+      icon: '/brand-mark.svg',
+      badge: '/brand-mark.svg',
+      data: { link: '/#profile' }
+    })
+  );
 });
 
 self.addEventListener('notificationclick', (event) => {

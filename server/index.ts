@@ -33,7 +33,7 @@ const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
 const footballDataApiKey = process.env.FOOTBALL_DATA_API_KEY ?? '';
 const footballDataApiBase = 'https://api.football-data.org';
 const cronSecret = process.env.CRON_SECRET ?? '';
-const appBaseUrl = (process.env.APP_BASE_URL ?? 'https://predileague.com').replace(/\/+$/, '');
+const appBaseUrl = (process.env.APP_BASE_URL ?? 'https://www.predileague.com').replace(/\/+$/, '');
 const firebaseServiceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON ?? '';
 const firebaseServiceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_JSON_BASE64 ?? '';
 

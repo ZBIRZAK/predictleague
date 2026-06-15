@@ -5,7 +5,7 @@ create extension if not exists pg_cron;
 create extension if not exists pg_net;
 
 select vault.create_secret(
-  'https://predileague.com',
+  'https://www.predileague.com',
   'push_reminder_base_url'
 );
 
