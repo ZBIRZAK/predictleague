@@ -1971,6 +1971,12 @@ function App() {
     try {
       setPushEnabling(true);
       setError('');
+      const reminderMinutes = Number(responsibleForm.reminderMinutesBefore);
+      if (Number.isNaN(reminderMinutes) || reminderMinutes < 5 || reminderMinutes > 180) {
+        setError('Reminder minutes must be between 5 and 180.');
+        return;
+      }
+      const normalizedReminderMinutes = Math.floor(reminderMinutes);
       await enablePushNotifications();
       await upsertUserProfile({
         userUid: user.uid,
@@ -1982,7 +1988,7 @@ function App() {
         favoriteTeam: profileForm.favoriteTeam,
         bio: profileForm.bio,
         remindersEnabled: true,
-        reminderMinutesBefore: 20,
+        reminderMinutesBefore: normalizedReminderMinutes,
         weeklySummaryEnabled: responsibleForm.weeklySummaryEnabled,
         takeBreakUntil: fromLocalDateTimeInput(responsibleForm.takeBreakUntil)
       });
@@ -1990,9 +1996,11 @@ function App() {
       setResponsibleForm((current) => ({
         ...current,
         remindersEnabled: true,
-        reminderMinutesBefore: '20'
+        reminderMinutesBefore: String(normalizedReminderMinutes)
       }));
-      setMessage('Push notifications enabled. Match reminders are set for 20 minutes before kickoff.');
+      setMessage(
+        `Push notifications enabled. Match reminders are set for ${normalizedReminderMinutes} minutes before kickoff.`
+      );
     } catch (err) {
       setPushPermission(typeof Notification === 'undefined' ? 'unsupported' : Notification.permission);
       setError(err instanceof Error ? err.message : 'Failed to enable push notifications.');
@@ -5180,7 +5188,7 @@ function App() {
                           ? 'Notifications are blocked in your browser settings.'
                           : pushPermission === 'unsupported'
                             ? 'This browser does not support web push notifications.'
-                            : 'Receive a reminder 20 minutes before kickoff.'}
+                            : `Receive a reminder ${responsibleForm.reminderMinutesBefore || '20'} minutes before kickoff.`}
                       </small>
                     </div>
                     <label>
