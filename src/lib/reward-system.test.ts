@@ -26,10 +26,10 @@ describe('reward tier limits', () => {
 
   it.each([
     [0, 2],
-    [20, 3],
-    [55, 4],
-    [100, 5],
-    [170, 5]
+    [20, 2],
+    [55, 2],
+    [100, 2],
+    [170, 2]
   ])('allows %i points to save %i picks per team', (points, expectedLimit) => {
     expect(getBonusPickLimitForPoints(points)).toBe(expectedLimit);
   });

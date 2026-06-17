@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type CSSProperties } from 'react';
 import {
   createUserWithEmailAndPassword,
   GoogleAuthProvider,
@@ -854,6 +854,7 @@ function PlayerPicksInput({
   onChange: (next: string) => void;
   compact?: boolean;
 }) {
+  const inputId = useId();
   const [selected, setSelected] = useState('');
   const normalizedMaxPicks = Number.isFinite(maxPicks) ? Math.max(1, Math.floor(maxPicks)) : 5;
   const picks = useMemo(() => parsePlayersInput(value, normalizedMaxPicks), [value, normalizedMaxPicks]);
@@ -862,6 +863,11 @@ function PlayerPicksInput({
     [options, picks]
   );
   const canAddMore = picks.length < normalizedMaxPicks;
+  const selectedPlayer = useMemo(() => {
+    const selectedToken = normalizePlayerToken(selected);
+    if (!selectedToken) return '';
+    return available.find((name) => normalizePlayerToken(name) === selectedToken) ?? '';
+  }, [available, selected]);
   const actualSet = useMemo(
     () => new Set((actualPlayers ?? []).map((name) => normalizePlayerToken(String(name ?? ''))).filter(Boolean)),
     [actualPlayers]
@@ -870,7 +876,7 @@ function PlayerPicksInput({
   const addSelected = () => {
     if (disabled) return;
     if (!canAddMore) return;
-    const candidate = selected.trim();
+    const candidate = selectedPlayer.trim();
     if (!candidate) return;
     const next = parsePlayersInput([...picks, candidate].join(', '), normalizedMaxPicks);
     onChange(next.join(', '));
@@ -893,15 +899,21 @@ function PlayerPicksInput({
       <div className={`player-picks-box ${disabled ? 'player-picks-box-disabled' : ''}`}>
         {!disabled ? (
           <div className="player-picker-actions">
-            <select value={selected} onChange={(e) => setSelected(e.target.value)} aria-label={title} disabled={!canAddMore}>
-              <option value="">{available.length > 0 ? 'Select player' : 'No players available'}</option>
+            <input
+              type="search"
+              value={selected}
+              list={inputId}
+              onChange={(e) => setSelected(e.target.value)}
+              aria-label={title}
+              placeholder={available.length > 0 ? 'Search player' : 'No players available'}
+              disabled={!canAddMore || available.length === 0}
+            />
+            <datalist id={inputId}>
               {available.map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
+                <option key={name} value={name} />
               ))}
-            </select>
-            <button type="button" className="details-btn" disabled={!selected || !canAddMore} onClick={addSelected}>
+            </datalist>
+            <button type="button" className="details-btn" disabled={!selectedPlayer || !canAddMore} onClick={addSelected}>
               Add
             </button>
           </div>
@@ -4186,7 +4198,7 @@ function App() {
                   <p>Each correct red-card player pick (optional): <strong>+1</strong></p>
                   <p>Perfect prediction (winner + HT + FT all correct): <strong>+2 bonus</strong></p>
                   <p className="muted">
-                    Bonus player-pick capacity unlocks by tier (currently {rewardProgress.tier.title}: {eventPickLimitPerTeam} picks/team).
+                    Bonus player picks are limited to {eventPickLimitPerTeam} players per team for each event.
                   </p>
                 </div>
               </section>

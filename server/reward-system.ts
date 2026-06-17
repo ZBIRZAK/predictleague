@@ -1,9 +1,9 @@
 export const SERVER_REWARD_TIERS = [
   { id: 'rookie', minPoints: 0, maxBonusPicksPerTeam: 2 },
-  { id: 'tactician', minPoints: 20, maxBonusPicksPerTeam: 3 },
-  { id: 'strategist', minPoints: 55, maxBonusPicksPerTeam: 4 },
-  { id: 'elite', minPoints: 100, maxBonusPicksPerTeam: 5 },
-  { id: 'legend', minPoints: 170, maxBonusPicksPerTeam: 5 }
+  { id: 'tactician', minPoints: 20, maxBonusPicksPerTeam: 2 },
+  { id: 'strategist', minPoints: 55, maxBonusPicksPerTeam: 2 },
+  { id: 'elite', minPoints: 100, maxBonusPicksPerTeam: 2 },
+  { id: 'legend', minPoints: 170, maxBonusPicksPerTeam: 2 }
 ] as const;
 
 export type PlayerPickIncident = {

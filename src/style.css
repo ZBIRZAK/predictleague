@@ -1691,7 +1691,8 @@ button:disabled {
   z-index: 2;
 }
 
-.player-picker-actions select {
+.player-picker-actions input {
+  min-width: 0;
   min-height: 30px;
   position: relative;
   z-index: 3;

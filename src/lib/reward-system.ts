@@ -20,29 +20,29 @@ export const REWARD_TIERS: RewardTier[] = [
     id: 'tactician',
     title: 'Tactician',
     minPoints: 20,
-    maxBonusPicksPerTeam: 3,
-    highlights: ['3 bonus picks per team', 'Higher chance to hit event bonuses']
+    maxBonusPicksPerTeam: 2,
+    highlights: ['2 bonus picks per team', 'Higher event-bonus multiplier tier']
   },
   {
     id: 'strategist',
     title: 'Strategist',
     minPoints: 55,
-    maxBonusPicksPerTeam: 4,
-    highlights: ['4 bonus picks per team', 'More flexible event prediction combinations']
+    maxBonusPicksPerTeam: 2,
+    highlights: ['2 bonus picks per team', 'More reward progress unlocked']
   },
   {
     id: 'elite',
     title: 'Elite',
     minPoints: 100,
-    maxBonusPicksPerTeam: 5,
-    highlights: ['5 bonus picks per team', 'Advanced bonus-pick depth']
+    maxBonusPicksPerTeam: 2,
+    highlights: ['2 bonus picks per team', 'Advanced reward tier status']
   },
   {
     id: 'legend',
     title: 'Legend',
     minPoints: 170,
-    maxBonusPicksPerTeam: 5,
-    highlights: ['Max 5 bonus picks per team', 'Full prediction depth unlocked']
+    maxBonusPicksPerTeam: 2,
+    highlights: ['Max 2 bonus picks per team', 'Full prediction tier unlocked']
   }
 ];
 
